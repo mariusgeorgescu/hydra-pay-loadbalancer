@@ -1,0 +1,97 @@
+cabal-version:   3.0
+name:            hydra-pay-loadbalancer
+version:         0.1.0.0
+
+-- synopsis:
+-- description:
+license:         Apache-2.0
+license-file:    LICENSE
+author:          Marius Georgescu
+maintainer:      georgescumarius@live.com
+
+-- copyright:
+category:        Development
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+
+-- extra-source-files:
+
+common warnings
+  ghc-options: -Wall -Wno-unused-imports
+
+library
+  import:           warnings
+  exposed-modules:  
+    MyLib
+    HydraPay.API
+    HydraPay.API.Types
+    HydraPay.Client
+    HydraPay.Client.Logger
+
+  -- other-modules:
+  -- other-extensions:
+  build-depends:    
+    , base                    ^>=4.18.2.0
+    , aeson                   ^>=2.1
+    , aeson-pretty            ^>=0.8
+    , bytestring              ^>=0.11.5
+    , deriving-aeson          ^>=0.2
+    , http-client             ^>=0.7
+    , http-client-tls         ^>=0.3
+    , http-types              ^>=0.12.4
+    , servant                 ^>=0.20
+    , servant-client          ^>=0.20
+    , servant-client-core     ^>=0.20
+    , servant-server          ^>=0.20
+    , text                    ^>=2.0
+    , time                    ^>=1.12
+    , vector                  ^>=0.13
+  hs-source-dirs:   src
+  default-language: GHC2021
+
+executable hydra-pay-loadbalancer
+  import:           warnings
+  main-is:          Main.hs
+
+  -- other-modules:
+  -- other-extensions:
+  build-depends:
+    , base                    ^>=4.18.2.0
+    , hydra-pay-loadbalancer
+    , aeson
+    , aeson-pretty
+    , bytestring             ^>=0.11.5
+    , deriving-aeson
+    , esqueleto
+    , extra
+    , http-types             ^>=0.12.4
+    , lens                   ^>=5.2.3
+    , monad-logger
+    , mtl
+    , multiset
+    , persistent
+    , persistent-postgresql
+    , servant-options
+    , servant-server
+    , servant-swagger
+    , swagger2
+    , text
+    , time
+    , wai
+    , warp
+
+  hs-source-dirs:   app
+  default-language: GHC2021
+
+test-suite hydra-pay-loadbalancer-test
+  import:           warnings
+  default-language: GHC2021
+
+  -- other-modules:
+  -- other-extensions:
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Main.hs
+  build-depends:
+    , base                    ^>=4.18.2.0
+    , hydra-pay-loadbalancer
