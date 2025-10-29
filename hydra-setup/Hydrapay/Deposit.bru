@@ -1,0 +1,22 @@
+meta {
+  name: Deposit
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/deposit
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "user_address": "addr_test1qprg7rzdsm2ml82499utezhsl43sz8nr39sd2t8djefhd7xjgx8m3d6keddfp04fr59vw2k0curt6jtss6evepvj5yjsa8wwlv",
+  //   "public_key": "",
+  //   "amount": [["77484e67c1ed6c96f55b89206cb5d6caae9a09a0bd473bba817929fe5553444d", 100]]
+    "amount": [["lovelace", 100000000]]
+  //   "amount": [["d2a8592ec9673ac18fea1044885f94518e954ab0cb2b6bb0a328d2af425443", 9980]]
+  //   "fundsUtxoRef":  null
+  }
+}

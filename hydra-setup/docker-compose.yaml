@@ -1,0 +1,170 @@
+services:
+  cardano-node:
+    image: ghcr.io/intersectmbo/cardano-node:${CARDANO_NODE_VERSION:-latest}
+    environment:
+      - NETWORK=preprod
+    volumes:
+      - preprod-node-db:/data/db
+      - preprod-node-ipc:/ipc
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200k"
+        max-file: "10"
+
+  hydra-node-1:
+    image: ghcr.io/cardano-scaling/hydra-node:0.22.0
+    container_name: hydra-node-1
+    volumes:
+      - preprod-node-ipc:/devnet
+      - ./credentials:/devnet/credentials
+      - ./persistence:/devnet/persistence
+      - ./protocol-parameters.json:/devnet/protocol-parameters.json
+    ports:
+      - "4001:4001"
+      - "5001:5001"
+    command:
+      [
+        "--node-id",
+        "1",
+        "--api-host",
+        "0.0.0.0",
+        "--listen",
+        "0.0.0.0:5001",
+        "--monitoring-port",
+        "6001",
+        "--api-port",
+        "4001",
+        "--hydra-scripts-tx-id",
+        "c9c4d820d5575173cfa81ba2d2d1096fc40f84d16d8c17284da410a4fb5e64eb,ae4443b46f550289337fc5c2c52b24f1288dab36d1a229167a6e04f056a966fe,48bd29e43dd01d12ab464f75fe40eed80e4051c8d3409e1cb20b8c01120b425e",
+        "--hydra-signing-key",
+        "/devnet/credentials/alice-hydra.sk",
+        # "--hydra-verification-key",
+        # "/devnet/credentials/bob-hydra.vk",
+        "--cardano-signing-key",
+        "/devnet/credentials/alice-node.sk",
+        # "--cardano-verification-key",
+        # "/devnet/credentials/bob-node.vk",
+        "--ledger-protocol-parameters",
+        "/devnet/protocol-parameters.json",
+        "--testnet-magic",
+        "1",
+        "--node-socket",
+        "/devnet/node.socket",
+        "--persistence-dir",
+        "/devnet/persistence/alice",
+        "--contestation-period",
+        "10s",
+        "--deposit-period",
+        "1200s",
+      ]
+    networks:
+      hydra_net:
+        aliases:
+          - hydra-node-1
+    restart: always
+
+
+  blazar-hydra:
+    image: mariusgeorgescu/blazar-hydra:latest
+    container_name: blazar-hydra
+    depends_on:
+      hydra-node-1:
+        condition: service_started
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    env_file:
+      - .env
+    environment:
+      # These can be overridden via command line or environment variables
+      - PORT=${PORT:-3000}
+      - PROVIDER_PROJECT_ID=${PROVIDER_PROJECT_ID}
+      - PROVIDER_URL=${PROVIDER_URL}
+      - NETWORK=${NETWORK}
+      - VALIDATOR_REF=${VALIDATOR_REF}
+      - HYDRA_KEY=${HYDRA_KEY}
+      - SEED=${SEED}
+      - ADMIN_NODE_WS_URL=ws://hydra-node-1:4001
+      - ADMIN_NODE_API_URL=http://hydra-node-1:4001
+      - USER_ADDRESS=${USER_ADDRESS:-}
+      - USER_SEED=${USER_SEED:-}
+      - USER_ADDRESS_2=${USER_ADDRESS_2:-}
+      - USER_SEED_2=${USER_SEED_2:-}
+      - LOGGER_LEVEL=${LOGGER_LEVEL:-info}
+      - DATABASE_URL=${DATABASE_URL:-file:./prisma/prisma/dev.db}
+    volumes:
+      # Persist database
+      - ./data:/app/prisma/prisma
+    networks:
+      - hydra_net
+    restart: always
+    # Optional: Add healthcheck if you have a /health endpoint
+    # healthcheck:
+    #   test: ["CMD", "node", "-e", "require('http').get('http://localhost:${PORT || 3000}/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+
+
+
+
+  # hydra-node-2:
+  #   image: ghcr.io/cardano-scaling/hydra-node:0.22.0
+  #   volumes:
+  #     - preprod-node-ipc:/devnet
+  #     - ./credentials:/devnet/credentials
+  #     - ./persistence:/devnet/persistence
+  #     - ./protocol-parameters.json:/devnet/protocol-parameters.json
+  #   ports:
+  #     - "4002:4002"
+  #     - "5002:5002"
+  #   command:
+  #     [
+  #       "--node-id",
+  #       "2",
+  #       "--api-host",
+  #       "0.0.0.0",
+  #       "--listen",
+  #       "172.16.238.20:5002",
+  #       "--monitoring-port",
+  #       "6002",
+  #       "--api-port",
+  #       "4002",
+  #       "--peer",
+  #       "172.16.238.10:5001",
+  #       "--hydra-scripts-tx-id",
+  #       "c9c4d820d5575173cfa81ba2d2d1096fc40f84d16d8c17284da410a4fb5e64eb,ae4443b46f550289337fc5c2c52b24f1288dab36d1a229167a6e04f056a966fe,48bd29e43dd01d12ab464f75fe40eed80e4051c8d3409e1cb20b8c01120b425e",
+  #       "--hydra-signing-key",
+  #       "/devnet/credentials/bob-hydra.sk",
+  #       "--hydra-verification-key",
+  #       "/devnet/credentials/alice-hydra.vk",
+  #       "--cardano-signing-key",
+  #       "/devnet/credentials/bob-node.sk",
+  #       "--cardano-verification-key",
+  #       "/devnet/credentials/alice-node.vk",
+  #       "--ledger-protocol-parameters",
+  #       "/devnet/protocol-parameters.json",
+  #       "--testnet-magic",
+  #       "1",
+  #       "--node-socket",
+  #       "/devnet/node.socket",
+  #       "--persistence-dir",
+  #       "/devnet/persistence/bob",
+  #       "--contestation-period",
+  #       "10s",
+  #       "--deposit-period",
+  #       "1200s",
+  #     ]
+  #   networks:
+  #     hydra_net:
+  #       ipv4_address: 172.16.238.20
+  #   restart: always
+
+networks:
+  hydra_net:
+    driver: bridge
+
+volumes:
+  preprod-node-db:
+  preprod-node-ipc:

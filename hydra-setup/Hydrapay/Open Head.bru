@@ -1,0 +1,19 @@
+meta {
+  name: Open Head
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/open-head
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "peer_api_urls": [
+      "http://127.0.0.1:4001/commit"
+    ]
+  }
+}

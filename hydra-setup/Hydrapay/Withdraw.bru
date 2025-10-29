@@ -1,0 +1,28 @@
+meta {
+  name: Withdraw
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/withdraw
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "address": "addr_test1qprg7rzdsm2ml82499utezhsl43sz8nr39sd2t8djefhd7xjgx8m3d6keddfp04fr59vw2k0curt6jtss6evepvj5yjsa8wwlv",   
+    "owner": "user",             
+    "funds_utxos": [
+      {
+        "signature": "",
+        "ref": {                    
+          "hash": "ece3921ec2f7df48fa1d8e58deb3a932c07027f47e001a10471ba7be2f2f4d10",
+          "index": 0
+        }
+      }
+    ],      
+    "network_layer": "L1"        
+  }
+}

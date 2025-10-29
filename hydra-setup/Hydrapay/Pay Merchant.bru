@@ -1,0 +1,23 @@
+meta {
+  name: Pay Merchant
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/pay-merchant
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "merchant_address": "addr_test1qqkmdp58hy4urz4zyszpdawfr23fhc3aky27rd7wh0u95h2pvaaxc8qdc6kmpuhz4t5kchxcneya5qtwfes0549pyujqveuc6j",  // The merchant's address receiving the payment.
+    "funds_utxo_ref": {             // The output reference of the user's funds UTxO within the Hydra Head.
+      "hash": "b303af340e66f1d12810118671e4975d25f399bed10263268c154bd17dc0f906",
+      "index": 1
+    },
+    "amount": [["lovelace", 3456789]],             // The amount of ADA (in Lovelace) to pay the merchant
+    "signature": ""        // A signature from the user's wallet, authorizing the L2 payment.
+  }
+}
