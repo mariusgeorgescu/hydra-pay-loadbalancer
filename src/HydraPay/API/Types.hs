@@ -20,16 +20,33 @@ module HydraPay.API.Types
     FundsUTxONotFoundError (..),
     BadRequest (..),
     InternalServerError (..),
+    
+    -- * Instances (explicitly export ToJSON for DepositSchema)
+    -- instance ToJSON DepositSchema  -- Explicitly exported
   )
 where
 
 import Control.Applicative ((<|>))
-import Data.Aeson
-import Data.Aeson.Types ()
+import Data.Maybe (mapMaybe)
+import Data.Aeson (Value(Array, String, Null, Object, Number), ToJSON(toJSON), FromJSON(parseJSON), object, (.=), (.:))
+import Data.Aeson.Types (defaultOptions, genericToJSON, genericParseJSON, Options(..))
+import Data.Char (toLower, toUpper, isUpper)
+import Data.Scientific (Scientific)
+import qualified Data.Scientific as Sci
 import Data.Text (Text)
 import Data.Vector (Vector)
-import Deriving.Aeson ()
+import qualified Data.Vector as Vec
 import GHC.Generics
+
+-- | Convert camelCase to snake_case
+camelTo2 :: Char -> String -> String
+camelTo2 _ [] = []
+camelTo2 separator (x:xs) = toLower x : go xs
+  where
+    go [] = []
+    go (y:ys)
+      | isUpper y = separator : toLower y : go ys
+      | otherwise = y : go ys
 
 -- | Transaction output reference
 data TxOutRef = TxOutRef
@@ -80,27 +97,51 @@ instance FromJSON FundsUtxo where
         }
 
 -- | Deposit request schema
+-- NOTE: Using [(Text, Integer)] for amount, which serializes to [["lovelace", 100000000]]
+-- This avoids Servant's issues with Vector (Vector Value) and [[Value]]
 data DepositSchema = DepositSchema
-  { depositUserAddress :: Text,
-    depositPublicKey :: Text,
-    depositAmount :: Vector (Vector Text),
+  { depositUserAddress :: Maybe Text,
+    depositPublicKey :: Maybe Text,
+    depositAmount :: [(Text, Integer)],  -- List of (asset unit, amount) tuples
     depositFundsUtxoRef :: Maybe TxOutRef
   }
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show)
 
 instance ToJSON DepositSchema where
-  toJSON =
-    genericToJSON
-      defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 7 -- drop "deposit"
-        }
+  toJSON (DepositSchema userAddr pubKey amt utxoRef) =
+    let -- Convert [(Text, Integer)] to [[Value]] format: [["lovelace", 100000000]]
+        amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
+        result = object $ concat
+          [ case userAddr of
+              Nothing -> [("user_address", Null)]
+              Just addr -> [("user_address", String addr)]
+          , case pubKey of
+              Nothing -> [("publicKey", Null)]
+              Just key -> [("publicKey", String key)]
+          , [("amount", amountArray)]
+          , case utxoRef of
+              Nothing -> [("fundsUtxoRef", Null)]
+              Just ref -> [("fundsUtxoRef", toJSON ref)]
+          ]
+    in result
 
 instance FromJSON DepositSchema where
-  parseJSON =
-    genericParseJSON
-      defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 7
-        }
+  parseJSON (Object v) = do
+    -- Parse amount as [[Value]] and convert to [(Text, Integer)]
+    amountArray <- v .: "amount"
+    let parseAmountItem (Array vec) = case Vec.toList vec of
+          [String unit, Number num] -> Just (unit, floor num)
+          _ -> Nothing
+        parseAmountItem _ = Nothing
+        amountList = case amountArray of
+          Array vec -> mapMaybe parseAmountItem (Vec.toList vec)
+          _ -> []
+    DepositSchema
+      <$> (v .: "user_address" <|> pure Nothing)
+      <*> (v .: "publicKey" <|> pure Nothing)
+      <*> pure amountList
+      <*> (v .: "fundsUtxoRef" <|> pure Nothing)
+  parseJSON _ = fail "Expected object for DepositSchema"
 
 -- | Withdraw request schema
 data WithdrawSchema = WithdrawSchema
@@ -126,28 +167,50 @@ instance FromJSON WithdrawSchema where
         }
 
 -- | Pay merchant request schema
+-- NOTE: Using [(Text, Integer)] for amount, which serializes to [["lovelace", 100000000]]
+-- This avoids Servant's issues with Vector (Vector Value) and [[Value]]
 data PayMerchantSchema = PayMerchantSchema
   { payMerchantMerchantAddress :: Text,
     payMerchantFundsUtxoRef :: TxOutRef,
-    payMerchantAmount :: Vector (Vector Text),
+    payMerchantAmount :: [(Text, Integer)],  -- List of (asset unit, amount) tuples
     payMerchantSignature :: Text,
     payMerchantMerchantFundsUtxo :: Maybe TxOutRef
   }
   deriving (Eq, Show, Generic)
 
 instance ToJSON PayMerchantSchema where
-  toJSON =
-    genericToJSON
-      defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 12 -- drop "payMerchant"
-        }
+  toJSON (PayMerchantSchema merchantAddr fundsUtxoRef amt signature merchantUtxo) =
+    let -- Convert [(Text, Integer)] to [[Value]] format: [["lovelace", 100000000]]
+        amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
+        baseObject = object
+          [ ("merchant_address", String merchantAddr)
+          , ("funds_utxo_ref", toJSON fundsUtxoRef)
+          , ("amount", amountArray)
+          , ("signature", String signature)
+          , ("merchant_funds_utxo", case merchantUtxo of
+              Nothing -> Null
+              Just utxo -> toJSON utxo)
+          ]
+    in baseObject
 
 instance FromJSON PayMerchantSchema where
-  parseJSON =
-    genericParseJSON
-      defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 12
-        }
+  parseJSON (Object v) = do
+    -- Parse amount as [[Value]] and convert to [(Text, Integer)]
+    amountArray <- v .: "amount"
+    let parseAmountItem (Array vec) = case Vec.toList vec of
+          [String unit, Number num] -> Just (unit, floor num)
+          _ -> Nothing
+        parseAmountItem _ = Nothing
+        amountList = case amountArray of
+          Array vec -> mapMaybe parseAmountItem (Vec.toList vec)
+          _ -> []
+    PayMerchantSchema
+      <$> v .: "merchant_address"
+      <*> v .: "funds_utxo_ref"
+      <*> pure amountList
+      <*> v .: "signature"
+      <*> (v .: "merchant_funds_utxo" <|> pure Nothing)
+  parseJSON _ = fail "Expected object for PayMerchantSchema"
 
 -- | Manage head request schema
 newtype ManageHeadSchema = ManageHeadSchema
@@ -212,11 +275,10 @@ instance ToJSON TxBuiltResponse where
         }
 
 instance FromJSON TxBuiltResponse where
-  parseJSON =
-    genericParseJSON
-      defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 7
-        }
+  parseJSON (Object v) = TxBuiltResponse
+    <$> v .: "cborHex"
+    <*> v .: "fundsUtxoRef"
+  parseJSON _ = fail "Expected object for TxBuiltResponse"
 
 -- | Address not found error
 newtype AddressNotFoundError = AddressNotFoundError

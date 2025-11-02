@@ -19,7 +19,7 @@ module HydraPay.Client
 
 import Control.Exception (try)
 import Data.List (isPrefixOf)
-import Network.HTTP.Client
+import qualified Network.HTTP.Client as HTTP
 import Network.HTTP.Client.TLS
 import Servant.Client
 import Servant.Client.Core (ClientError(..))
@@ -29,21 +29,29 @@ import Servant.API
 import HydraPay.API
 import HydraPay.API.Types
 
+-- Explicitly import ToJSON to ensure it's available for Servant
+import Data.Aeson (ToJSON(..))
+
 -- | Client error type
 data HydraClientError
-  = HydraClientHttpError ClientError
+  = HydraClientHttpError ClientError [String]
   | HydraClientException String
   deriving (Eq, Show)
 
 -- | Generated client functions
 queryFunds :: String -> ClientM QueryFundsResponse
-deposit :: DepositSchema -> ClientM TxBuiltResponse
+deposit' :: DepositSchema -> ClientM TxBuiltResponse
 withdraw :: WithdrawSchema -> ClientM TxBuiltResponse
 payMerchant :: PayMerchantSchema -> ClientM TxBuiltResponse
 openHead :: ManageHeadSchema -> ClientM NoContent
 closeHead :: ManageHeadSchema -> ClientM NoContent
 
-(queryFunds :<|> deposit :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead) = client hydraAPI
+-- Generate client from API definition
+(queryFunds :<|> deposit' :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead) = client hydraAPI
+
+-- Exported wrapper (keeping original name for compatibility)
+deposit :: DepositSchema -> ClientM TxBuiltResponse
+deposit = deposit'
 
 -- | Run a Hydra client action with logging
 runHydraClient :: String -> ClientM a -> IO (Either HydraClientError a)
@@ -54,12 +62,12 @@ runHydraClient baseUrl clientAction = do
   
   result <- try $ runClientM clientAction clientEnv
   case result of
-    Left (HttpExceptionRequest _ e) -> 
+    Left (HTTP.HttpExceptionRequest _ e) -> 
       return $ Left $ HydraClientException $ show e
-    Left (InvalidUrlException _ e) -> 
+    Left (HTTP.InvalidUrlException _ e) -> 
       return $ Left $ HydraClientException $ show e
     Right (Left clientErr) -> 
-      return $ Left $ HydraClientHttpError clientErr
+      return $ Left $ HydraClientHttpError clientErr []
     Right (Right val) -> 
       return $ Right val
 
@@ -80,3 +88,4 @@ extractPort url =
         ':' : portStr -> read $ takeWhile (/= '/') portStr
         _ -> if "https://" `isPrefixOf` url then 443 else 80  -- Default ports
     _ -> if "https://" `isPrefixOf` url then 443 else 80
+

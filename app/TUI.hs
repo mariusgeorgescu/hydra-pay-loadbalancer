@@ -5,31 +5,55 @@ module TUI where
 import Brick.AttrMap qualified as A
 import Brick.Main qualified as M
 import Brick.Types qualified as T
+import Brick.Util qualified as Util
 import Brick.Widgets.Border qualified as B
 import Brick.Widgets.Center qualified as C
 import Brick.Widgets.Core qualified as W
 import Brick.Widgets.Edit qualified as E
 import Control.Monad
-import Control.Monad.State
-import Control.Monad.Reader
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.State (get, put, modify)
+import Data.Aeson (encode, toJSON)
 import Data.Aeson.Encode.Pretty (encodePretty)
+import Data.List (isInfixOf)
 import Data.Text qualified as Text
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Vector qualified as Vec
 import Graphics.Vty qualified as V
 import HydraPay.API.Types
-import HydraPay.Client
+import HydraPay.Client (runHydraClient, HydraClientError(..))
 import MyLib
+import System.IO
 
 -- | Name for different UI resources
 data ResourceName
-  = EditField
+  = QueryFundsEditField
+  | DepositUserAddressField
+  | DepositPublicKeyField
+  | DepositAssetUnitField
+  | DepositAmountField
+  | WithdrawAddressField
+  | WithdrawOwnerField
+  | WithdrawUtxoHashField
+  | WithdrawUtxoIndexField
+  | WithdrawSignatureField
+  | PayMerchantMerchantAddressField
+  | PayMerchantUtxoHashField
+  | PayMerchantUtxoIndexField
+  | PayMerchantAssetUnitField
+  | PayMerchantAmountField
+  | PayMerchantSignatureField
+  | PayMerchantMerchantUtxoHashField
+  | PayMerchantMerchantUtxoIndexField
+  | OpenHeadUrlsField
+  | CloseHeadIdField
   deriving (Eq, Ord, Show)
 
 -- | Current screen shown to the user
 data Screen
-  = MainMenuScreen
+  = SplashScreen
+  | MainMenuScreen
   | QueryFundsFormScreen {qfEdit :: E.Editor String ResourceName}
   | DepositFormScreen
       { dsfCurrentField :: Int
@@ -45,12 +69,14 @@ data Screen
       }
   | OpenHeadFormScreen {ohEdit :: E.Editor String ResourceName}
   | CloseHeadFormScreen {chEdit :: E.Editor String ResourceName}
+  | ResultScreen {rsMessage :: [String], rsTitle :: String}
   deriving (Show)
 
 -- | Application state
 data AppState = AppState
   { currentScreen :: Screen
   , apiBaseUrl :: String
+  , splashLogo :: [String]
   }
   deriving (Show)
 
@@ -58,6 +84,7 @@ data AppState = AppState
 drawUI :: AppState -> [T.Widget ResourceName]
 drawUI appState =
   let widget = case currentScreen appState of
+        SplashScreen -> drawSplashScreen (splashLogo appState)
         MainMenuScreen -> drawMainMenu
         QueryFundsFormScreen edit -> drawQueryFundsForm edit
         DepositFormScreen current fields -> drawDepositForm current fields
@@ -65,13 +92,28 @@ drawUI appState =
         PayMerchantFormScreen current fields -> drawPayMerchantForm current fields
         OpenHeadFormScreen edit -> drawOpenHeadForm edit
         CloseHeadFormScreen edit -> drawCloseHeadForm edit
+        ResultScreen message title -> drawResultScreen message title
   in [widget]
+
+-- | Splash screen with BlazaLabs logo
+drawSplashScreen :: [String] -> T.Widget ResourceName
+drawSplashScreen logoLines =
+  C.center $
+    W.withAttr (A.attrName "cyan") $
+      W.vBox $
+        [W.str ""]
+          ++ map W.str logoLines
+          ++ [ W.str ""
+             , W.str ""
+             , W.str "                             Press any key to continue"
+             , W.str ""
+             ]
 
 -- | Main menu
 drawMainMenu :: T.Widget ResourceName
 drawMainMenu =
   C.center $
-    B.borderWithLabel (W.str "Hydra Pay Load Balancer") $
+    B.borderWithLabel (W.str "Blazar Pay Admin") $
       W.vBox
         [ W.str ""
         , W.str "Select an operation:"
@@ -118,7 +160,7 @@ drawDepositForm current fields =
         , W.str "Amount:"
         , E.renderEditor (W.str . unlines) (current == 3) (fields !! 3)
         , W.str ""
-        , W.str "Press Enter to execute, Esc to go back"
+        , W.str "Press Tab to move between fields, Enter to execute, Esc to go back"
         , W.str ""
         ]
 
@@ -140,7 +182,7 @@ drawWithdrawForm current fields =
         , W.str "Signature:"
         , E.renderEditor (W.str . unlines) (current == 4) (fields !! 4)
         , W.str ""
-        , W.str "Press Enter to execute, Esc to go back"
+        , W.str "Press Tab to move between fields, Enter to execute, Esc to go back"
         , W.str ""
         ]
 
@@ -168,7 +210,7 @@ drawPayMerchantForm current fields =
         , W.str "Merchant UTxO Index:"
         , E.renderEditor (W.str . unlines) (current == 7) (fields !! 7)
         , W.str ""
-        , W.str "Press Enter to execute, Esc to go back"
+        , W.str "Press Tab to move between fields, Enter to execute, Esc to go back"
         , W.str ""
         ]
 
@@ -202,9 +244,25 @@ drawCloseHeadForm edit =
         , W.str ""
         ]
 
+-- | Result screen
+drawResultScreen :: [String] -> String -> T.Widget ResourceName
+drawResultScreen message title =
+  C.center $
+    B.borderWithLabel (W.str title) $
+      W.vBox
+        [ W.str ""
+        , W.vBox $ map W.str message
+        , W.str ""
+        , W.str "Press Esc to go back"
+        , W.str ""
+        ]
+
 -- | Attribute map for styling
 theMap :: A.AttrMap
-theMap = A.attrMap V.defAttr []
+theMap =
+  A.attrMap V.defAttr
+    [ (A.attrName "cyan", Util.fg V.cyan)
+    ]
 
 -- | Get editor content
 getEditorText :: E.Editor String n -> String
@@ -219,10 +277,15 @@ handleEvent :: T.BrickEvent ResourceName e -> T.EventM ResourceName AppState ()
 handleEvent ev = do
   appState <- get
   case currentScreen appState of
+    SplashScreen ->
+      case ev of
+        -- Any keypress goes to main menu
+        _ -> do
+          put $ appState {currentScreen = MainMenuScreen}
     MainMenuScreen ->
       case ev of
         (T.VtyEvent (V.EvKey (V.KChar '1') [])) -> do
-          put $ appState {currentScreen = QueryFundsFormScreen {qfEdit = E.editor EditField (Just 1) ""}}
+          put $ appState {currentScreen = QueryFundsFormScreen {qfEdit = E.editor QueryFundsEditField (Just 1) ""}}
         (T.VtyEvent (V.EvKey (V.KChar '2') [])) -> do
           put $
             appState
@@ -230,10 +293,10 @@ handleEvent ev = do
                   DepositFormScreen
                     { dsfCurrentField = 0
                     , dsfFields =
-                        [ E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
+                        [ E.editor DepositUserAddressField (Just 1) ""
+                        , E.editor DepositPublicKeyField (Just 1) ""
+                        , E.editor DepositAssetUnitField (Just 1) ""
+                        , E.editor DepositAmountField (Just 1) ""
                         ]
                     }
               }
@@ -244,11 +307,11 @@ handleEvent ev = do
                   WithdrawFormScreen
                     { wfsfCurrentField = 0
                     , wfsfFields =
-                        [ E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) "user"
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
+                        [ E.editor WithdrawAddressField (Just 1) ""
+                        , E.editor WithdrawOwnerField (Just 1) "user"
+                        , E.editor WithdrawUtxoHashField (Just 1) ""
+                        , E.editor WithdrawUtxoIndexField (Just 1) ""
+                        , E.editor WithdrawSignatureField (Just 1) ""
                         ]
                     }
               }
@@ -259,21 +322,21 @@ handleEvent ev = do
                   PayMerchantFormScreen
                     { pmfsCurrentField = 0
                     , pmfsFields =
-                        [ E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
-                        , E.editor EditField (Just 1) ""
+                        [ E.editor PayMerchantMerchantAddressField (Just 1) ""
+                        , E.editor PayMerchantUtxoHashField (Just 1) ""
+                        , E.editor PayMerchantUtxoIndexField (Just 1) ""
+                        , E.editor PayMerchantAssetUnitField (Just 1) ""
+                        , E.editor PayMerchantAmountField (Just 1) ""
+                        , E.editor PayMerchantSignatureField (Just 1) ""
+                        , E.editor PayMerchantMerchantUtxoHashField (Just 1) ""
+                        , E.editor PayMerchantMerchantUtxoIndexField (Just 1) ""
                         ]
                     }
               }
         (T.VtyEvent (V.EvKey (V.KChar '5') [])) -> do
-          put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = E.editor EditField (Just 1) ""}}
+          put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = E.editor OpenHeadUrlsField (Just 1) ""}}
         (T.VtyEvent (V.EvKey (V.KChar '6') [])) -> do
-          put $ appState {currentScreen = CloseHeadFormScreen {chEdit = E.editor EditField (Just 1) ""}}
+          put $ appState {currentScreen = CloseHeadFormScreen {chEdit = E.editor CloseHeadIdField (Just 1) ""}}
         (T.VtyEvent (V.EvKey (V.KChar 'q') [])) -> M.halt
         (T.VtyEvent (V.EvKey V.KEsc [])) -> M.halt
         _ -> return ()
@@ -283,7 +346,8 @@ handleEvent ev = do
           put $ appState {currentScreen = MainMenuScreen}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
           let addr = getEditorText edit
-          liftIO $ execQueryFunds (apiBaseUrl appState) addr
+          result <- liftIO $ execQueryFunds (apiBaseUrl appState) addr
+          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Query Funds Result"}}
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = QueryFundsFormScreen {qfEdit = newEdit}}
@@ -291,8 +355,21 @@ handleEvent ev = do
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
+        (T.VtyEvent (V.EvKey (V.KChar '\t') [])) -> do
+          -- Handle Tab character to move to next field
+          let nextField = (current + 1) `mod` length fields
+          put $ appState {currentScreen = DepositFormScreen {dsfCurrentField = nextField, dsfFields = fields}}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          liftIO $ execDeposit (apiBaseUrl appState) (getEditorText $ fields !! 0) (getEditorText $ fields !! 1) (getEditorText $ fields !! 2) (getEditorText $ fields !! 3)
+          let userAddress = getEditorText $ fields !! 0
+          let publicKey = getEditorText $ fields !! 1
+          let assetUnit = getEditorText $ fields !! 2
+          let amount = getEditorText $ fields !! 3
+          if null userAddress || null assetUnit || null amount
+            then do
+              put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "Address, Asset Unit, and Amount are required. Public Key is optional."], rsTitle = "Validation Error"}}
+            else do
+              result <- liftIO $ execDeposit (apiBaseUrl appState) userAddress publicKey assetUnit amount
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Deposit Result"}}
         _ -> do
           let currentEditor = fields !! current
           newEditor <- handleEditorEvent ev currentEditor
@@ -302,8 +379,21 @@ handleEvent ev = do
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
+        (T.VtyEvent (V.EvKey (V.KChar '\t') [])) -> do
+          let nextField = (current + 1) `mod` length fields
+          put $ appState {currentScreen = WithdrawFormScreen {wfsfCurrentField = nextField, wfsfFields = fields}}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          liftIO $ execWithdraw (apiBaseUrl appState) (getEditorText $ fields !! 0) (getEditorText $ fields !! 1) (getEditorText $ fields !! 2) (getEditorText $ fields !! 3) (getEditorText $ fields !! 4)
+          let address = getEditorText $ fields !! 0
+          let owner = getEditorText $ fields !! 1
+          let utxoHash = getEditorText $ fields !! 2
+          let utxoIndex = getEditorText $ fields !! 3
+          let signature = getEditorText $ fields !! 4
+          if null address || null owner || null utxoHash || null utxoIndex || null signature
+            then do
+              put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "All fields are required. Please fill in all fields before submitting."], rsTitle = "Validation Error"}}
+            else do
+              result <- liftIO $ execWithdraw (apiBaseUrl appState) address owner utxoHash utxoIndex signature
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Withdraw Result"}}
         _ -> do
           let currentEditor = fields !! current
           newEditor <- handleEditorEvent ev currentEditor
@@ -313,8 +403,24 @@ handleEvent ev = do
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
+        (T.VtyEvent (V.EvKey (V.KChar '\t') [])) -> do
+          let nextField = (current + 1) `mod` length fields
+          put $ appState {currentScreen = PayMerchantFormScreen {pmfsCurrentField = nextField, pmfsFields = fields}}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          liftIO $ execPayMerchant (apiBaseUrl appState) (getEditorText $ fields !! 0) (getEditorText $ fields !! 1) (getEditorText $ fields !! 2) (getEditorText $ fields !! 3) (getEditorText $ fields !! 4) (getEditorText $ fields !! 5) (getEditorText $ fields !! 6) (getEditorText $ fields !! 7)
+          let merchantAddress = getEditorText $ fields !! 0
+          let utxoHash = getEditorText $ fields !! 1
+          let utxoIndex = getEditorText $ fields !! 2
+          let assetUnit = getEditorText $ fields !! 3
+          let amount = getEditorText $ fields !! 4
+          let signature = getEditorText $ fields !! 5
+          let merchantUtxoHash = getEditorText $ fields !! 6
+          let merchantUtxoIndex = getEditorText $ fields !! 7
+          if null merchantAddress || null utxoHash || null utxoIndex || null assetUnit || null amount || null signature
+            then do
+              put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "All fields except Merchant Funds UTxO are required."], rsTitle = "Validation Error"}}
+            else do
+              result <- liftIO $ execPayMerchant (apiBaseUrl appState) merchantAddress utxoHash utxoIndex assetUnit amount signature merchantUtxoHash merchantUtxoIndex
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Pay Merchant Result"}}
         _ -> do
           let currentEditor = fields !! current
           newEditor <- handleEditorEvent ev currentEditor
@@ -326,7 +432,8 @@ handleEvent ev = do
           put $ appState {currentScreen = MainMenuScreen}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
           let urls = getEditorText edit
-          liftIO $ execOpenHead (apiBaseUrl appState) urls
+          result <- liftIO $ execOpenHead (apiBaseUrl appState) urls
+          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Open Head Result"}}
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = newEdit}}
@@ -336,10 +443,16 @@ handleEvent ev = do
           put $ appState {currentScreen = MainMenuScreen}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
           let headId = getEditorText edit
-          liftIO $ execCloseHead (apiBaseUrl appState) headId
+          result <- liftIO $ execCloseHead (apiBaseUrl appState) headId
+          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Close Head Result"}}
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = CloseHeadFormScreen {chEdit = newEdit}}
+    ResultScreen _ _ ->
+      case ev of
+        (T.VtyEvent (V.EvKey V.KEsc [])) -> do
+          put $ appState {currentScreen = MainMenuScreen}
+        _ -> return ()
 
 -- Helper function that wraps the editor state action in our app state
 handleEditorEvent :: T.BrickEvent ResourceName e -> E.Editor String ResourceName -> T.EventM ResourceName AppState (E.Editor String ResourceName)
@@ -348,31 +461,56 @@ handleEditorEvent ev edit = do
   return newEditor
 
 -- | Execute query funds
-execQueryFunds :: String -> String -> IO ()
+execQueryFunds :: String -> String -> IO [String]
 execQueryFunds baseUrl addr = do
   result <- runHydraClient baseUrl $ queryFunds addr
   case result of
-    Left err -> putStrLn $ "Error: " ++ show err
-    Right funds -> putStrLn $ TL.unpack $ TLE.decodeUtf8 $ encodePretty funds
+    Left err -> return ["Error: " ++ show err]
+    Right funds -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty funds]
 
 -- | Execute deposit
-execDeposit :: String -> String -> String -> String -> String -> IO ()
+execDeposit :: String -> String -> String -> String -> String -> IO [String]
 execDeposit baseUrl userAddress publicKey assetUnit amount = do
-  let amountVec = Vec.fromList [Vec.fromList [Text.pack assetUnit, Text.pack amount]]
+  let amountList = [(Text.pack assetUnit, read amount :: Integer)]
+  let userAddrMaybe = if null userAddress then Nothing else Just $ Text.pack userAddress
+  let pubKeyMaybe = if null publicKey then Nothing else Just $ Text.pack publicKey
   let depositReq =
         DepositSchema
-          { depositUserAddress = Text.pack userAddress
-          , depositPublicKey = Text.pack publicKey
-          , depositAmount = amountVec
+          { depositUserAddress = userAddrMaybe
+          , depositPublicKey = pubKeyMaybe
+          , depositAmount = amountList
           , depositFundsUtxoRef = Nothing
           }
+  let debugJsonPretty = TL.unpack $ TLE.decodeUtf8 $ encodePretty depositReq
+  let debugJsonCompact = TL.unpack $ TLE.decodeUtf8 $ encode depositReq
+  -- Double-check that user_address is not Nothing
+  let debugInfo = ["Debug: userAddress='" ++ userAddress ++ "'", "userAddrMaybe=" ++ show userAddrMaybe, "", "Compact JSON (what Servant uses):", debugJsonCompact, ""]
+  -- Now that we use [(Text, Integer)] instead of [[Value]], Servant works correctly
   result <- runHydraClient baseUrl $ deposit depositReq
   case result of
-    Left err -> putStrLn $ "Error: " ++ show err
-    Right tx -> putStrLn $ TL.unpack $ TLE.decodeUtf8 $ encodePretty tx
+    Left (HydraClientHttpError clientErr httpDebugInfo) -> 
+      let errStr = show clientErr
+          -- Wrap long error messages into multiple lines for better display
+          maxLineLength = 80
+          wrapLine :: String -> [String]
+          wrapLine line
+            | length line <= maxLineLength = [line]
+            | otherwise = take maxLineLength line : wrapLine (drop maxLineLength line)
+          wrappedLines = concatMap wrapLine (lines errStr)
+      in return (debugInfo ++ ["", "HTTP Debug Info:"] ++ httpDebugInfo ++ ["", "Error:"] ++ wrappedLines ++ ["", "Debug JSON (Pretty):", debugJsonPretty])
+    Left err -> 
+      let errStr = show err
+          maxLineLength = 80
+          wrapLine :: String -> [String]
+          wrapLine line
+            | length line <= maxLineLength = [line]
+            | otherwise = take maxLineLength line : wrapLine (drop maxLineLength line)
+          wrappedLines = concatMap wrapLine (lines errStr)
+      in return (debugInfo ++ ["Error:"] ++ wrappedLines ++ ["", "Debug JSON (Pretty):", debugJsonPretty])
+    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
 
 -- | Execute withdraw
-execWithdraw :: String -> String -> String -> String -> String -> String -> IO ()
+execWithdraw :: String -> String -> String -> String -> String -> String -> IO [String]
 execWithdraw baseUrl address owner utxoHash utxoIndexStr signature = do
   let utxo =
         FundsUtxo
@@ -392,11 +530,11 @@ execWithdraw baseUrl address owner utxoHash utxoIndexStr signature = do
           }
   result <- runHydraClient baseUrl $ withdraw withdrawReq
   case result of
-    Left err -> putStrLn $ "Error: " ++ show err
-    Right tx -> putStrLn $ TL.unpack $ TLE.decodeUtf8 $ encodePretty tx
+    Left err -> return ["Error: " ++ show err]
+    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
 
 -- | Execute pay merchant
-execPayMerchant :: String -> String -> String -> String -> String -> String -> String -> String -> String -> IO ()
+execPayMerchant :: String -> String -> String -> String -> String -> String -> String -> String -> String -> IO [String]
 execPayMerchant baseUrl merchantAddress utxoHash utxoIndexStr assetUnit amount signature merchantUtxoHash merchantUtxoIndexStr = do
   let merchantUtxo =
         if null merchantUtxoHash
@@ -407,7 +545,7 @@ execPayMerchant baseUrl merchantAddress utxoHash utxoIndexStr assetUnit amount s
                 { txOutRefHash = Text.pack merchantUtxoHash
                 , txOutRefIndex = read merchantUtxoIndexStr
                 }
-  let amountVec = Vec.fromList [Vec.fromList [Text.pack assetUnit, Text.pack amount]]
+  let amountList = [(Text.pack assetUnit, read amount :: Integer)]
   let payMerchantReq =
         PayMerchantSchema
           { payMerchantMerchantAddress = Text.pack merchantAddress
@@ -416,37 +554,40 @@ execPayMerchant baseUrl merchantAddress utxoHash utxoIndexStr assetUnit amount s
                 { txOutRefHash = Text.pack utxoHash
                 , txOutRefIndex = read utxoIndexStr
                 }
-          , payMerchantAmount = amountVec
+          , payMerchantAmount = amountList
           , payMerchantSignature = Text.pack signature
           , payMerchantMerchantFundsUtxo = merchantUtxo
           }
   result <- runHydraClient baseUrl $ payMerchant payMerchantReq
   case result of
-    Left err -> putStrLn $ "Error: " ++ show err
-    Right tx -> putStrLn $ TL.unpack $ TLE.decodeUtf8 $ encodePretty tx
+    Left err -> return ["Error: " ++ show err]
+    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
 
 -- | Execute open head
-execOpenHead :: String -> String -> IO ()
+execOpenHead :: String -> String -> IO [String]
 execOpenHead baseUrl urlsStr = do
   let urls = fmap Text.pack $ words urlsStr
   let openHeadReq = ManageHeadSchema {manageHeadPeerApiUrls = Vec.fromList urls}
   result <- runHydraClient baseUrl $ openHead openHeadReq
   case result of
-    Left err -> putStrLn $ "Error: " ++ show err
-    Right _ -> putStrLn "Head opened successfully!"
+    Left err -> return ["Error: " ++ show err]
+    Right _ -> return ["Success!", "Head opened successfully!"]
 
 -- | Execute close head
-execCloseHead :: String -> String -> IO ()
+execCloseHead :: String -> String -> IO [String]
 execCloseHead _baseUrl headId = do
-  putStrLn $ "Close Head operation requires proper endpoint implementation: " ++ headId
+  return ["Error", "Close Head operation requires proper endpoint implementation: " ++ headId]
 
 -- | Run the TUI application
 runTUI :: String -> IO ()
 runTUI baseUrl = do
+  logoContent <- readFile "BlazaLabsAsciiLogo.txt"
+  let logoLines = lines logoContent
   let initialState =
         AppState
-          { currentScreen = MainMenuScreen
+          { currentScreen = SplashScreen
           , apiBaseUrl = baseUrl
+          , splashLogo = logoLines
           }
   let app =
         M.App
