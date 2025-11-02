@@ -55,9 +55,8 @@ tests = do
   putStrLn $ "✓ fundsUtxoRef is null: " ++ show hasNullFundsUtxoRef
   
   -- Check that amount is an array with number (not string)
-  -- The number should appear as a JSON number (no quotes)
   let hasQuotedNumber = "\"100000000\"" `isInfixOf` jsonStr
-  let hasUnquotedNumber = "\"lovelace\",\n            100000000" `isInfixOf` jsonStr || 
+  let hasUnquotedNumber = "\"lovelace\",\n            100000000" `isInfixOf` jsonStr ||
                           "\"lovelace\", 100000000" `isInfixOf` jsonStr ||
                           ("lovelace" `isInfixOf` jsonStr && "100000000" `isInfixOf` jsonStr && not hasQuotedNumber)
   let amountIsNumber = hasUnquotedNumber
@@ -72,4 +71,4 @@ tests = do
     else do
       putStrLn "\n❌ Some tests failed!"
       fail "Serialization verification failed"
-
+  

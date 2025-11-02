@@ -15,7 +15,8 @@ type HydraAPI =
   :<|> "withdraw" :> ReqBody '[JSON] WithdrawSchema :> Post '[JSON] TxBuiltResponse
   :<|> "pay-merchant" :> ReqBody '[JSON] PayMerchantSchema :> Post '[JSON] TxBuiltResponse
   :<|> "open-head" :> ReqBody '[JSON] ManageHeadSchema :> Post '[JSON] NoContent
-  :<|> "close-head" :> ReqBody '[JSON] ManageHeadSchema :> Post '[JSON] NoContent
+  :<|> "close-head" :> QueryParam' '[Required] "id" String :> Post '[JSON] NoContent
+  :<|> "state" :> QueryParam' '[Required] "id" String :> Get '[JSON] HeadStateResponse
 
 -- | Proxy for the API type
 hydraAPI :: Proxy HydraAPI

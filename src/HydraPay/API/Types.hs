@@ -12,6 +12,7 @@ module HydraPay.API.Types
     ManageHeadSchema (..),
     QueryFundsResponse (..),
     TxBuiltResponse (..),
+    HeadStateResponse (..),
     FundsUtxo (..),
 
     -- * Error Types
@@ -21,8 +22,8 @@ module HydraPay.API.Types
     BadRequest (..),
     InternalServerError (..),
     
-    -- * Instances (explicitly export ToJSON for DepositSchema)
-    -- instance ToJSON DepositSchema  -- Explicitly exported
+    -- * Instances
+    -- Explicitly re-export ToJSON instance for DepositSchema to ensure Servant can see it
   )
 where
 
@@ -105,23 +106,23 @@ data DepositSchema = DepositSchema
     depositAmount :: [(Text, Integer)],  -- List of (asset unit, amount) tuples
     depositFundsUtxoRef :: Maybe TxOutRef
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
 instance ToJSON DepositSchema where
   toJSON (DepositSchema userAddr pubKey amt utxoRef) =
-    let -- Convert [(Text, Integer)] to [[Value]] format: [["lovelace", 100000000]]
-        amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
-        result = object $ concat
-          [ case userAddr of
-              Nothing -> [("user_address", Null)]
-              Just addr -> [("user_address", String addr)]
-          , case pubKey of
-              Nothing -> [("publicKey", Null)]
-              Just key -> [("publicKey", String key)]
-          , [("amount", amountArray)]
-          , case utxoRef of
-              Nothing -> [("fundsUtxoRef", Null)]
-              Just ref -> [("fundsUtxoRef", toJSON ref)]
+    -- Convert [(Text, Integer)] to [[Value]] format: [["lovelace", 100000000]]
+    let amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
+        result = object
+          [ ("user_address", case userAddr of
+              Nothing -> Null
+              Just addr -> String addr)
+          , ("publicKey", case pubKey of
+              Nothing -> Null
+              Just key -> String key)
+          , ("amount", amountArray)
+          , ("fundsUtxoRef", case utxoRef of
+              Nothing -> Null
+              Just ref -> toJSON ref)
           ]
     in result
 
@@ -222,14 +223,14 @@ instance ToJSON ManageHeadSchema where
   toJSON =
     genericToJSON
       defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 11 -- drop "manageHead"
+        { fieldLabelModifier = camelTo2 '_' . drop 10 -- drop "manageHead" (10 chars) -> "PeerApiUrls" -> "peer_api_urls"
         }
 
 instance FromJSON ManageHeadSchema where
   parseJSON =
     genericParseJSON
       defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 11
+        { fieldLabelModifier = camelTo2 '_' . drop 10 -- drop "manageHead" (10 chars) -> "PeerApiUrls" -> "peer_api_urls"
         }
 
 -- | Query funds response
@@ -258,6 +259,28 @@ instance FromJSON QueryFundsResponse where
             "queryFundsTotalInL1" -> "totalInL1"
             "queryFundsTotalInL2" -> "totalInL2"
             _ -> camelTo2 '_' $ drop 10 s -- drop "queryFunds"
+        }
+
+-- | Head state response
+data HeadStateResponse = HeadStateResponse
+  { headStateStatus :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON HeadStateResponse where
+  toJSON =
+    genericToJSON
+      defaultOptions
+        { fieldLabelModifier = camelTo2 '_' . drop 10 -- drop "headState" -> "status"
+        }
+
+instance FromJSON HeadStateResponse where
+  parseJSON =
+    genericParseJSON
+      defaultOptions
+        { fieldLabelModifier = \s -> case s of
+            "headStateStatus" -> "status"
+            _ -> camelTo2 '_' $ drop 10 s -- drop "headState"
         }
 
 -- | Transaction built response

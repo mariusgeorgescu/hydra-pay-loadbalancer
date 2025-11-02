@@ -1,4 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Avoid lambda" #-}
+{-# HLINT ignore "Use <$>" #-}
 
 module TUI where
 
@@ -13,7 +16,7 @@ import Brick.Widgets.Edit qualified as E
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put, modify)
-import Data.Aeson (encode, toJSON)
+import Data.Aeson (encode, toJSON, ToJSON)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.List (isInfixOf)
 import Data.Text qualified as Text
@@ -21,8 +24,8 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Vector qualified as Vec
 import Graphics.Vty qualified as V
-import HydraPay.API.Types
-import HydraPay.Client (runHydraClient, HydraClientError(..))
+import HydraPay.API.Types (HeadStateResponse(..))
+import HydraPay.Client (runHydraClient, HydraClientError(..), formatError, getHeadState)
 import MyLib
 import System.IO
 
@@ -48,6 +51,7 @@ data ResourceName
   | PayMerchantMerchantUtxoIndexField
   | OpenHeadUrlsField
   | CloseHeadIdField
+  | StateHeadIdField
   deriving (Eq, Ord, Show)
 
 -- | Current screen shown to the user
@@ -69,6 +73,7 @@ data Screen
       }
   | OpenHeadFormScreen {ohEdit :: E.Editor String ResourceName}
   | CloseHeadFormScreen {chEdit :: E.Editor String ResourceName}
+  | StateHeadFormScreen {shEdit :: E.Editor String ResourceName}
   | ResultScreen {rsMessage :: [String], rsTitle :: String}
   deriving (Show)
 
@@ -92,6 +97,7 @@ drawUI appState =
         PayMerchantFormScreen current fields -> drawPayMerchantForm current fields
         OpenHeadFormScreen edit -> drawOpenHeadForm edit
         CloseHeadFormScreen edit -> drawCloseHeadForm edit
+        StateHeadFormScreen edit -> drawStateHeadForm edit
         ResultScreen message title -> drawResultScreen message title
   in [widget]
 
@@ -124,6 +130,7 @@ drawMainMenu =
         , W.str "  4. Pay Merchant"
         , W.str "  5. Open Head"
         , W.str "  6. Close Head"
+        , W.str "  7. Check Head State"
         , W.str ""
         , W.str "  q. Quit"
         , W.str ""
@@ -244,6 +251,21 @@ drawCloseHeadForm edit =
         , W.str ""
         ]
 
+-- | State head form
+drawStateHeadForm :: E.Editor String ResourceName -> T.Widget ResourceName
+drawStateHeadForm edit =
+  C.center $
+    B.borderWithLabel (W.str "Check Head State") $
+      W.vBox
+        [ W.str ""
+        , W.str "Enter Head ID:"
+        , W.str ""
+        , E.renderEditor (W.str . unlines) True edit
+        , W.str ""
+        , W.str "Press Enter to execute, Esc to go back"
+        , W.str ""
+        ]
+
 -- | Result screen
 drawResultScreen :: [String] -> String -> T.Widget ResourceName
 drawResultScreen message title =
@@ -337,6 +359,8 @@ handleEvent ev = do
           put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = E.editor OpenHeadUrlsField (Just 1) ""}}
         (T.VtyEvent (V.EvKey (V.KChar '6') [])) -> do
           put $ appState {currentScreen = CloseHeadFormScreen {chEdit = E.editor CloseHeadIdField (Just 1) ""}}
+        (T.VtyEvent (V.EvKey (V.KChar '7') [])) -> do
+          put $ appState {currentScreen = StateHeadFormScreen {shEdit = E.editor StateHeadIdField (Just 1) ""}}
         (T.VtyEvent (V.EvKey (V.KChar 'q') [])) -> M.halt
         (T.VtyEvent (V.EvKey V.KEsc [])) -> M.halt
         _ -> return ()
@@ -448,6 +472,17 @@ handleEvent ev = do
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = CloseHeadFormScreen {chEdit = newEdit}}
+    StateHeadFormScreen edit ->
+      case ev of
+        (T.VtyEvent (V.EvKey V.KEsc [])) -> do
+          put $ appState {currentScreen = MainMenuScreen}
+        (T.VtyEvent (V.EvKey V.KEnter [])) -> do
+          let headId = getEditorText edit
+          result <- liftIO $ execHeadState (apiBaseUrl appState) headId
+          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Head State Result"}}
+        _ -> do
+          newEdit <- handleEditorEvent ev edit
+          put $ appState {currentScreen = StateHeadFormScreen {shEdit = newEdit}}
     ResultScreen _ _ ->
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
@@ -460,13 +495,42 @@ handleEditorEvent ev edit = do
   (newEditor, _) <- T.nestEventM edit $ E.handleEditorEvent ev
   return newEditor
 
+-- | Helper to format request debug info (for ToJSON requests)
+formatRequestJsonDebug :: ToJSON req => req -> [String]
+formatRequestJsonDebug req =
+  let debugJsonPretty = TL.unpack $ TLE.decodeUtf8 $ encodePretty req
+      debugJsonCompact = TL.unpack $ TLE.decodeUtf8 $ encode req
+  in ["Request JSON (Compact):", debugJsonCompact, "", "Request JSON (Pretty):", debugJsonPretty, ""]
+
+-- | Helper to format request debug info (for non-ToJSON requests like query-funds)
+formatRequestDebug :: String -> [String]
+formatRequestDebug requestStr = ["Request:", requestStr, ""]
+
+-- | Execute a client action with debug info and error formatting
+-- This helper consolidates the common pattern of:
+-- 1. Building a request
+-- 2. Encoding it to JSON for debug output
+-- 3. Running the client action
+-- 4. Formatting success/error responses
+execWithDebug :: (ToJSON req, ToJSON res) => String -> req -> (req -> IO (Either HydraClientError res)) -> IO [String]
+execWithDebug _baseUrl req clientFn = do
+  let debugInfo = formatRequestJsonDebug req
+  result <- clientFn req
+
+  case result of
+    Right res ->
+      return $ ["Success!", ""] ++ debugInfo ++ [TL.unpack $ TLE.decodeUtf8 $ encodePretty res]
+    Left err ->
+      return $ debugInfo ++ formatError err
+
 -- | Execute query funds
 execQueryFunds :: String -> String -> IO [String]
 execQueryFunds baseUrl addr = do
+  let debugInfo = formatRequestDebug $ "Address: " ++ addr
   result <- runHydraClient baseUrl $ queryFunds addr
   case result of
-    Left err -> return ["Error: " ++ show err]
-    Right funds -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty funds]
+    Left err -> return $ debugInfo ++ formatError err
+    Right funds -> return $ ["Success!", ""] ++ debugInfo ++ [TL.unpack $ TLE.decodeUtf8 $ encodePretty funds]
 
 -- | Execute deposit
 execDeposit :: String -> String -> String -> String -> String -> IO [String]
@@ -481,33 +545,7 @@ execDeposit baseUrl userAddress publicKey assetUnit amount = do
           , depositAmount = amountList
           , depositFundsUtxoRef = Nothing
           }
-  let debugJsonPretty = TL.unpack $ TLE.decodeUtf8 $ encodePretty depositReq
-  let debugJsonCompact = TL.unpack $ TLE.decodeUtf8 $ encode depositReq
-  -- Double-check that user_address is not Nothing
-  let debugInfo = ["Debug: userAddress='" ++ userAddress ++ "'", "userAddrMaybe=" ++ show userAddrMaybe, "", "Compact JSON (what Servant uses):", debugJsonCompact, ""]
-  -- Now that we use [(Text, Integer)] instead of [[Value]], Servant works correctly
-  result <- runHydraClient baseUrl $ deposit depositReq
-  case result of
-    Left (HydraClientHttpError clientErr httpDebugInfo) -> 
-      let errStr = show clientErr
-          -- Wrap long error messages into multiple lines for better display
-          maxLineLength = 80
-          wrapLine :: String -> [String]
-          wrapLine line
-            | length line <= maxLineLength = [line]
-            | otherwise = take maxLineLength line : wrapLine (drop maxLineLength line)
-          wrappedLines = concatMap wrapLine (lines errStr)
-      in return (debugInfo ++ ["", "HTTP Debug Info:"] ++ httpDebugInfo ++ ["", "Error:"] ++ wrappedLines ++ ["", "Debug JSON (Pretty):", debugJsonPretty])
-    Left err -> 
-      let errStr = show err
-          maxLineLength = 80
-          wrapLine :: String -> [String]
-          wrapLine line
-            | length line <= maxLineLength = [line]
-            | otherwise = take maxLineLength line : wrapLine (drop maxLineLength line)
-          wrappedLines = concatMap wrapLine (lines errStr)
-      in return (debugInfo ++ ["Error:"] ++ wrappedLines ++ ["", "Debug JSON (Pretty):", debugJsonPretty])
-    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
+  execWithDebug baseUrl depositReq (\r -> runHydraClient baseUrl $ deposit r)
 
 -- | Execute withdraw
 execWithdraw :: String -> String -> String -> String -> String -> String -> IO [String]
@@ -528,10 +566,7 @@ execWithdraw baseUrl address owner utxoHash utxoIndexStr signature = do
           , withdrawFundsUtxos = Vec.fromList [utxo]
           , withdrawNetworkLayer = "L1"
           }
-  result <- runHydraClient baseUrl $ withdraw withdrawReq
-  case result of
-    Left err -> return ["Error: " ++ show err]
-    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
+  execWithDebug baseUrl withdrawReq (runHydraClient baseUrl . withdraw)
 
 -- | Execute pay merchant
 execPayMerchant :: String -> String -> String -> String -> String -> String -> String -> String -> String -> IO [String]
@@ -558,25 +593,37 @@ execPayMerchant baseUrl merchantAddress utxoHash utxoIndexStr assetUnit amount s
           , payMerchantSignature = Text.pack signature
           , payMerchantMerchantFundsUtxo = merchantUtxo
           }
-  result <- runHydraClient baseUrl $ payMerchant payMerchantReq
-  case result of
-    Left err -> return ["Error: " ++ show err]
-    Right tx -> return ["Success!", "", TL.unpack $ TLE.decodeUtf8 $ encodePretty tx]
+  execWithDebug baseUrl payMerchantReq (\r -> runHydraClient baseUrl $ payMerchant r)
 
 -- | Execute open head
 execOpenHead :: String -> String -> IO [String]
 execOpenHead baseUrl urlsStr = do
   let urls = fmap Text.pack $ words urlsStr
   let openHeadReq = ManageHeadSchema {manageHeadPeerApiUrls = Vec.fromList urls}
+  let debugInfo = formatRequestJsonDebug openHeadReq
+
   result <- runHydraClient baseUrl $ openHead openHeadReq
   case result of
-    Left err -> return ["Error: " ++ show err]
-    Right _ -> return ["Success!", "Head opened successfully!"]
+    Left err -> return $ debugInfo ++ formatError err
+    Right _ -> return $ ["Success!", "Head opened successfully!", ""] ++ debugInfo
 
 -- | Execute close head
 execCloseHead :: String -> String -> IO [String]
-execCloseHead _baseUrl headId = do
-  return ["Error", "Close Head operation requires proper endpoint implementation: " ++ headId]
+execCloseHead baseUrl headId = do
+  let debugInfo = formatRequestDebug $ "Head ID: " ++ headId
+  result <- runHydraClient baseUrl $ closeHead headId
+  case result of
+    Left err -> return $ debugInfo ++ formatError err
+    Right _ -> return $ ["Success!", "Head closed successfully!", ""] ++ debugInfo
+
+-- | Execute get head state
+execHeadState :: String -> String -> IO [String]
+execHeadState baseUrl headId = do
+  let debugInfo = formatRequestDebug $ "Head ID: " ++ headId
+  result <- runHydraClient baseUrl $ getHeadState headId
+  case result of
+    Left err -> return $ debugInfo ++ formatError err
+    Right state -> return $ ["Success!", ""] ++ debugInfo ++ ["Status: " ++ show (headStateStatus state)]
 
 -- | Run the TUI application
 runTUI :: String -> IO ()

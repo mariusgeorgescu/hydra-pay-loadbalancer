@@ -2,63 +2,69 @@
 
 This document tracks significant issues encountered during development and their solutions.
 
-## Issue: Servant ReqBody '[JSON] Encoding Failure with Nested Vector/List of Dynamic Values
+## Issue: Server Rejects Requests with `Content-Type: application/json;charset=utf-8`
 
 ### Problem
-When using `Vector (Vector Value)` or `[[Value]]` for the `amount` field in `DepositSchema` and `PayMerchantSchema`, Servant's client generation failed to correctly serialize the request body. Even though Aeson could encode the types correctly (verified by direct `encode` calls), Servant would send an empty or malformed body, resulting in server errors like:
-
+The Hydra Payments API server was rejecting deposit requests with error messages indicating "undefined" fields:
 ```
 "received": "undefined"
 "path": ["user_address"]
 "message": "Required"
 ```
 
-### Root Cause
-Servant's `ReqBody '[JSON]` combinator has limitations when dealing with:
-- Nested structures (Vector of Vector, or list of lists)
-- Dynamic types (`Value` type from Aeson)
-- The combination of both
+Even though:
+- The request body was correctly formatted JSON
+- All required fields were present
+- Direct encoding with Aeson produced correct JSON
 
-The issue occurred even when:
-- Custom `ToJSON` instances were provided
-- Direct Aeson encoding worked correctly
-- The JSON structure was verified to be correct
+### Root Cause
+**The server's JSON parser rejects `Content-Type: application/json;charset=utf-8` and requires exactly `Content-Type: application/json`.**
+
+This was verified via curl:
+- **With charset:** `curl --header 'content-type: application/json;charset=utf-8'` → Server returns "undefined" for all fields
+- **Without charset:** `curl --header 'content-type: application/json'` → Server parses JSON correctly
+
+Servant automatically adds `charset=utf-8` to the Content-Type header for JSON requests, which the server cannot handle.
 
 ### Solution
-Changed the amount type from `Vector (Vector Value)` / `[[Value]]` to `[(Text, Integer)]` (a list of tuples).
+Implemented a `managerModifyRequest` hook in `runHydraClient` that:
+1. Intercepts all HTTP requests before they're sent
+2. Detects `Content-Type` header with `charset=utf-8` suffix
+3. Removes the charset suffix, leaving only `application/json`
+4. Returns the modified request with corrected headers
 
-**Before:**
+**Implementation:**
 ```haskell
-data DepositSchema = DepositSchema
-  { depositAmount :: Vector (Vector Value)  -- or [[Value]]
-  ...
-}
+let captureHook req = do
+      let headers = HTTP.requestHeaders req
+          fixedHeaders = map (\(k, v) -> 
+            -- Detect Content-Type header and remove charset=utf-8
+            let kStr = show k
+                kName = if "Content-Type" `isInfixOf` kStr || "content-type" `isInfixOf` (map toLower kStr)
+                          then "Content-Type"
+                          else kStr
+                kBytes = BS8.pack kName
+                kLower = BS8.map toLower kBytes
+                contentTypeLower = BS8.map toLower (BS8.pack "Content-Type")
+                isContentType = kLower == contentTypeLower
+                hasCharset = "charset=utf-8" `BS.isInfixOf` v
+            in if isContentType && hasCharset
+              then (k, BS8.pack "application/json")
+              else (k, v)) headers
+      return req { HTTP.requestHeaders = fixedHeaders }
 ```
 
-**After:**
-```haskell
-data DepositSchema = DepositSchema
-  { depositAmount :: [(Text, Integer)]  -- List of (asset unit, amount) tuples
-  ...
-}
-```
+### Verification
+**Before Fix:**
+- Headers: `Content-Type: application/json;charset=utf-8`
+- Server Error: `"received": "undefined"` for fields
 
-The `ToJSON` instance converts `[(Text, Integer)]` to the required JSON format:
-```json
-"amount": [["lovelace", 100000000]]
-```
-
-### Benefits
-1. **Type Safety**: Concrete `(Text, Integer)` tuples instead of dynamic `Value` types
-2. **Servant Compatibility**: Servant handles simple types like lists of tuples correctly
-3. **Cleaner API**: More intuitive to work with `[(Text, Integer)]` than nested `Value` arrays
-4. **Correct Serialization**: Still produces the exact JSON format required by the API
+**After Fix:**
+- Headers: `Content-Type: application/json`
+- Server Response: JSON parsed correctly (transaction validation errors expected in test environment)
 
 ### Files Changed
-- `src/HydraPay/API/Types.hs`: Changed `depositAmount` and `payMerchantAmount` types
-- `app/TUI.hs`: Updated to construct `[(Text, Integer)]` instead of `[[Value]]`
-- `hydra-pay-loadbalancer.cabal`: Added `scientific` dependency for number conversion
+- `src/HydraPay/Client.hs`: Added Content-Type header modification in `runHydraClient`
 
 ### Date
 November 2025
-

@@ -27,6 +27,7 @@ library
     HydraPay.API.Types
     HydraPay.Client
     HydraPay.Client.Logger
+    HydraPay.Client.Deposit
 
   -- other-modules:
   -- other-extensions:
@@ -98,6 +99,7 @@ test-suite hydra-pay-loadbalancer-test
   default-language: GHC2021
 
   other-modules:    DepositSchemaSerializationTest
+                    DepositServantTest
   -- other-extensions:
   type:             exitcode-stdio-1.0
   hs-source-dirs:   tests
