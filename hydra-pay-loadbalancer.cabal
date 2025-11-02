@@ -52,20 +52,24 @@ library
 executable hydra-pay-loadbalancer
   import:           warnings
   main-is:          Main.hs
-
-  -- other-modules:
+  other-modules:    TUI
   -- other-extensions:
+  ghc-options:      -threaded
+  
   build-depends:
     , base                    ^>=4.18.2.0
     , hydra-pay-loadbalancer
     , aeson
     , aeson-pretty
+    , brick
     , bytestring             ^>=0.11.5
     , deriving-aeson
     , esqueleto
     , extra
     , http-types             ^>=0.12.4
     , lens                   ^>=5.2.3
+    , microlens
+    , microlens-mtl
     , monad-logger
     , mtl
     , multiset
@@ -75,8 +79,11 @@ executable hydra-pay-loadbalancer
     , servant-server
     , servant-swagger
     , swagger2
+    , stm
     , text
     , time
+    , vector
+    , vty
     , wai
     , warp
 
