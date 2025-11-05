@@ -21,7 +21,7 @@ module HydraPay.API.Types
     FundsUTxONotFoundError (..),
     BadRequest (..),
     InternalServerError (..),
-    
+
     -- * Instances
     -- Explicitly re-export ToJSON instance for DepositSchema to ensure Servant can see it
   )
@@ -113,16 +113,10 @@ instance ToJSON DepositSchema where
     -- Convert [(Text, Integer)] to [[Value]] format: [["lovelace", 100000000]]
     let amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
         result = object
-          [ ("user_address", case userAddr of
-              Nothing -> Null
-              Just addr -> String addr)
-          , ("publicKey", case pubKey of
-              Nothing -> Null
-              Just key -> String key)
+          [ ("user_address", maybe Null String userAddr)
+          , ("publicKey", maybe Null String pubKey)
           , ("amount", amountArray)
-          , ("fundsUtxoRef", case utxoRef of
-              Nothing -> Null
-              Just ref -> toJSON ref)
+          , ("fundsUtxoRef", maybe Null toJSON utxoRef)
           ]
     in result
 
