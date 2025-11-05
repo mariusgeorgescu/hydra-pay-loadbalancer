@@ -25,7 +25,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put, modify)
 import Data.Aeson (encode, toJSON, ToJSON)
 import Data.Aeson.Encode.Pretty (encodePretty)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, find)
 import Data.Text qualified as Text
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as TLE
@@ -36,15 +36,23 @@ import Control.Exception (catch, SomeException)
 import qualified Network.HTTP.Client as HTTP
 import Network.HTTP.Types (statusCode)
 import HydraPay.API.Types (HeadStateResponse(..))
-import HydraPay.Client (runHydraClient, HydraClientError(..), formatError, getHeadState)
+import HydraPay.Client (runHydraClient, HydraClientError(..), formatError, getHeadState, getHead)
 import MyLib
 import System.IO
+import qualified Data.Maybe
 
 -- | Service configuration
 data Service = Service
   { serviceName :: String
   , serviceHost :: String
   , servicePort :: Int
+  }
+  deriving (Eq, Show)
+
+-- | Hydra Head information
+data HydraHeadInfo = HydraHeadInfo
+  { hydraHeadPort :: Int
+  , hydraHeadId :: Maybe String  -- Nothing means "Closed", Just id means active head
   }
   deriving (Eq, Show)
 
@@ -115,8 +123,8 @@ data ResourceName
   | PayMerchantMerchantUtxoIndexField
   | OpenHeadUrlsField
   | CloseHeadIdField
-  | StateHeadIdField
   | ResultViewport  -- Viewport for scrolling result screens
+  | ActionsViewport  -- Viewport for scrolling Actions menu
   deriving (Eq, Ord, Show)
 
 -- | Current screen shown to the user
@@ -137,8 +145,7 @@ data Screen
       , pmfsFields :: [E.Editor String ResourceName]
       }
   | OpenHeadFormScreen {ohEdit :: E.Editor String ResourceName}
-  | CloseHeadFormScreen {chEdit :: E.Editor String ResourceName}
-  | StateHeadFormScreen {shEdit :: E.Editor String ResourceName}
+  | CloseHeadFormScreen  -- No longer needs editor, uses current service's head ID
   | ResultScreen {rsMessage :: [String], rsTitle :: String, rsScrollOffset :: Int}
   deriving (Show)
 
@@ -148,6 +155,8 @@ data AppState = AppState
   , services :: [Service]
   , selectedServiceIndex :: Int  -- Index of currently selected service
   , splashLogo :: [String]
+  , headerLogo :: [String]  -- Header logo for main screen
+  , hydraHeads :: [HydraHeadInfo]  -- Cached Hydra Heads data
   }
   deriving (Show)
 
@@ -159,24 +168,35 @@ selectedService appState = services appState !! selectedServiceIndex appState
 currentBaseUrl :: AppState -> String
 currentBaseUrl = serviceBaseUrl . selectedService
 
+-- | Get peer API URL for Open Head based on selected service
+-- Extracts service number from port (e.g., 3001 -> 1, 3002 -> 2)
+-- Returns "http://hydra-node-{serviceNo}:400{serviceNo}/commit"
+getPeerApiUrl :: AppState -> String
+getPeerApiUrl appState =
+  let svc = selectedService appState
+      port = servicePort svc
+      -- Extract service number from port (3001 -> 1, 3002 -> 2, etc.)
+      serviceNo = port - 3000
+  in "http://hydra-node-" ++ show serviceNo ++ ":400" ++ show serviceNo ++ "/commit"
+
 -- | Drawing function
 drawUI :: AppState -> [T.Widget ResourceName]
 drawUI appState =
   let mainWidget = case currentScreen appState of
         SplashScreen -> drawSplashScreen (splashLogo appState)
-        MainMenuScreen -> drawMainMenu
+        MainMenuScreen -> drawMainMenu (hydraHeads appState) appState
         QueryFundsFormScreen edit -> drawQueryFundsForm edit
         DepositFormScreen current fields -> drawDepositForm current fields
         WithdrawFormScreen current fields -> drawWithdrawForm current fields
         PayMerchantFormScreen current fields -> drawPayMerchantForm current fields
         OpenHeadFormScreen edit -> drawOpenHeadForm edit
-        CloseHeadFormScreen edit -> drawCloseHeadForm edit
-        StateHeadFormScreen edit -> drawStateHeadForm edit
+        CloseHeadFormScreen -> drawCloseHeadForm appState
         ResultScreen message title scrollOffset -> drawResultScreen message title scrollOffset
       servicesWidget = drawServicesPanel appState
-      -- Show services panel only when not on splash screen
+      -- Show services panel only when not on splash screen and not on main menu
       layout = case currentScreen appState of
         SplashScreen -> [mainWidget]
+        MainMenuScreen -> [mainWidget]  -- Services widget is integrated in main menu
         _ -> [W.hBox [servicesWidget, W.str " ", mainWidget]]
   in layout
 
@@ -218,14 +238,19 @@ drawSplashScreen logoLines =
              , W.str ""
              ]
 
--- | Main menu
-drawMainMenu :: T.Widget ResourceName
-drawMainMenu =
-  C.center $
-    B.borderWithLabel (W.str "Blazar Pay Admin") $
-      W.vBox
-        [ W.str ""
-        , W.str "Select an operation:"
+-- | Main menu with Dashboard and Admin zones
+drawMainMenu :: [HydraHeadInfo] -> AppState -> T.Widget ResourceName
+drawMainMenu heads appState =
+  let -- Header logo (centered and cyan colored)
+      logoWidget = C.center $ W.withAttr (A.attrName "cyan") $ W.vBox $ map W.str (headerLogo appState)
+      
+      -- Dashboard zone (top): Hydra Heads widget
+      headsTable = drawHydraHeadsTable heads
+      dashboardZone = B.borderWithLabel (W.str "Dashboard") headsTable
+      
+      -- Actions menu (right side) with scrollbar
+      menuOptions = W.vBox
+        [ W.str "Select an operation:"
         , W.str ""
         , W.str "  1. Query Funds"
         , W.str "  2. Deposit"
@@ -233,11 +258,67 @@ drawMainMenu =
         , W.str "  4. Pay Merchant"
         , W.str "  5. Open Head"
         , W.str "  6. Close Head"
-        , W.str "  7. Check Head State"
         , W.str ""
+        , W.str "  r. Refresh Heads"
         , W.str "  q. Quit"
-        , W.str ""
         ]
+      viewportWidget = W.viewport ActionsViewport T.Vertical menuOptions
+      viewportWithScrollbar = W.withVScrollBars T.OnRight viewportWidget
+      actionsBox = B.borderWithLabel (W.str "Actions") viewportWithScrollbar
+      
+      -- Services widget (left side)
+      servicesWidget = drawServicesPanel appState
+      
+      -- Admin zone (bottom): Services on left, Actions on right
+      adminZone = B.borderWithLabel (W.str "Admin") $
+        W.hBox [servicesWidget, W.str "  ", actionsBox]
+      
+      -- Full layout: Logo centered on top, Dashboard and Admin centered horizontally
+  in W.vBox
+       [ logoWidget
+       , W.str ""
+       , C.center dashboardZone
+       , W.str ""
+       , C.center adminZone
+       ]
+
+-- | Hydra Heads table widget (compact version for main menu)
+drawHydraHeadsTable :: [HydraHeadInfo] -> T.Widget ResourceName
+drawHydraHeadsTable heads =
+  let -- Helper function to pad a string to a fixed width (left-aligned)
+      padToWidth :: Int -> String -> String
+      padToWidth width s = s ++ replicate (max 0 (width - length s)) ' '
+      
+      -- Calculate column widths (very compact)
+      portColWidth = 8
+      headIdColWidth = 30
+      
+      -- Create a cell widget (no padding)
+      makeCell :: Int -> String -> T.Widget ResourceName
+      makeCell width content = W.str $ padToWidth width content
+      
+      -- Create header row (compact headers, no border)
+      headerPort = makeCell portColWidth "Port"
+      headerHeadId = makeCell headIdColWidth "HeadID"
+      headerRow = W.hBox [headerPort, W.str " | ", headerHeadId]
+      
+      -- Render a data row (no borders for compactness)
+      renderRow headInfo =
+        let portStr = show (hydraHeadPort headInfo)
+            (headIdStr, headIdAttr) = case hydraHeadId headInfo of
+              Nothing -> ("Closed", A.attrName "headClosed")
+              Just headId -> ( headId, A.attrName "headOpen")
+            portCell = makeCell portColWidth portStr
+            headIdCell = W.withAttr headIdAttr $ makeCell headIdColWidth headIdStr
+        in W.hBox [portCell, W.str " | ", headIdCell]
+      
+      -- Create all rows: header, then data rows
+      dataRows = map renderRow heads
+      allRows = headerRow : dataRows
+      
+      -- Create table content (ultra compact, no borders)
+      tableContent = W.vBox allRows
+  in B.borderWithLabel (W.str "Hydra Heads") tableContent
 
 -- | Query funds form
 drawQueryFundsForm :: E.Editor String ResourceName -> T.Widget ResourceName
@@ -339,35 +420,30 @@ drawOpenHeadForm edit =
         , W.str ""
         ]
 
--- | Close head form
-drawCloseHeadForm :: E.Editor String ResourceName -> T.Widget ResourceName
-drawCloseHeadForm edit =
-  C.center $
-    B.borderWithLabel (W.str "Close Head") $
-      W.vBox
-        [ W.str ""
-        , W.str "Enter Head ID:"
-        , W.str ""
-        , E.renderEditor (W.str . unlines) True edit
-        , W.str ""
-        , W.str "Press Enter to execute, Esc to go back"
-        , W.str ""
-        ]
-
--- | State head form
-drawStateHeadForm :: E.Editor String ResourceName -> T.Widget ResourceName
-drawStateHeadForm edit =
-  C.center $
-    B.borderWithLabel (W.str "Check Head State") $
-      W.vBox
-        [ W.str ""
-        , W.str "Enter Head ID:"
-        , W.str ""
-        , E.renderEditor (W.str . unlines) True edit
-        , W.str ""
-        , W.str "Press Enter to execute, Esc to go back"
-        , W.str ""
-        ]
+-- | Close head form - shows current service's head ID or message
+drawCloseHeadForm :: AppState -> T.Widget ResourceName
+drawCloseHeadForm appState =
+  let currentService = selectedService appState
+      currentPort = servicePort currentService
+      -- Find head info for current service
+      maybeHeadInfo = find (\h -> hydraHeadPort h == currentPort) (hydraHeads appState)
+      (headIdMessage, headIdAttr) = case maybeHeadInfo >>= hydraHeadId of
+        Nothing -> ("The head is not open", A.attrName "headClosed")
+        Just headId -> (headId, A.attrName "headOpen")
+      headIdWidget = W.withAttr headIdAttr $ W.str headIdMessage
+  in C.center $
+       B.borderWithLabel (W.str "Close Head") $
+         W.vBox
+           [ W.str ""
+           , W.str ("Service Port: " ++ show currentPort)
+           , W.str ""
+           , W.str "Head ID:"
+           , W.str ""
+           , headIdWidget
+           , W.str ""
+           , W.str "Press Enter to close head, Esc to go back"
+           , W.str ""
+           ]
 
 -- | Result screen with scrolling support using Brick viewports
 drawResultScreen :: [String] -> String -> Int -> T.Widget ResourceName
@@ -391,6 +467,8 @@ theMap =
   A.attrMap V.defAttr
     [ (A.attrName "cyan", Util.fg V.cyan)
     , (A.attrName "selected", Util.fg V.green `V.withStyle` V.bold)
+    , (A.attrName "headOpen", Util.fg V.yellow)
+    , (A.attrName "headClosed", Util.fg V.red)
     ]
 
 -- | Get editor content
@@ -463,13 +541,25 @@ handleEvent ev = do
                     }
               }
         (T.VtyEvent (V.EvKey (V.KChar '5') [])) -> do
-          put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = E.editor OpenHeadUrlsField (Just 1) ""}}
+          let peerApiUrl = getPeerApiUrl appState
+          put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = E.editor OpenHeadUrlsField (Just 1) peerApiUrl}}
         (T.VtyEvent (V.EvKey (V.KChar '6') [])) -> do
-          put $ appState {currentScreen = CloseHeadFormScreen {chEdit = E.editor CloseHeadIdField (Just 1) ""}}
-        (T.VtyEvent (V.EvKey (V.KChar '7') [])) -> do
-          put $ appState {currentScreen = StateHeadFormScreen {shEdit = E.editor StateHeadIdField (Just 1) ""}}
+          put $ appState {currentScreen = CloseHeadFormScreen}
+        (T.VtyEvent (V.EvKey (V.KChar 'r') [])) -> do
+          -- Refresh Hydra Heads data
+          newHeads <- liftIO $ fetchHydraHeads (services appState)
+          put $ appState {hydraHeads = newHeads}
         (T.VtyEvent (V.EvKey (V.KChar 'q') [])) -> M.halt
         (T.VtyEvent (V.EvKey V.KEsc [])) -> M.halt
+        -- Allow scrolling in Actions viewport
+        (T.VtyEvent (V.EvKey V.KUp [])) -> do
+          vScrollBy (viewportScroll ActionsViewport) (-1)
+        (T.VtyEvent (V.EvKey V.KDown [])) -> do
+          vScrollBy (viewportScroll ActionsViewport) 1
+        (T.VtyEvent (V.EvKey V.KPageUp [])) -> do
+          vScrollBy (viewportScroll ActionsViewport) (-5)
+        (T.VtyEvent (V.EvKey V.KPageDown [])) -> do
+          vScrollBy (viewportScroll ActionsViewport) 5
         (T.VtyEvent (V.EvKey (V.KChar '\t') [])) -> do
           -- Switch to next service
           let currentIdx = selectedServiceIndex appState
@@ -570,33 +660,33 @@ handleEvent ev = do
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
           let urls = getEditorText edit
           result <- liftIO $ execOpenHead (currentBaseUrl appState) urls
-          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Open Head Result", rsScrollOffset = 0}}
+          -- Refresh Hydra Heads after opening head
+          newHeads <- liftIO $ fetchHydraHeads (services appState)
+          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Open Head Result", rsScrollOffset = 0}, hydraHeads = newHeads}
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = newEdit}}
-    CloseHeadFormScreen edit ->
+    CloseHeadFormScreen ->
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          let headId = getEditorText edit
-          result <- liftIO $ execCloseHead (currentBaseUrl appState) headId
-          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Close Head Result", rsScrollOffset = 0}}
-        _ -> do
-          newEdit <- handleEditorEvent ev edit
-          put $ appState {currentScreen = CloseHeadFormScreen {chEdit = newEdit}}
-    StateHeadFormScreen edit ->
-      case ev of
-        (T.VtyEvent (V.EvKey V.KEsc [])) -> do
-          put $ appState {currentScreen = MainMenuScreen}
-        (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          let headId = getEditorText edit
-          result <- liftIO $ execHeadState (currentBaseUrl appState) headId
-          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Head State Result", rsScrollOffset = 0}}
-        _ -> do
-          newEdit <- handleEditorEvent ev edit
-          put $ appState {currentScreen = StateHeadFormScreen {shEdit = newEdit}}
-    ResultScreen message title _scrollOffset ->
+          -- Get head ID for current service
+          let currentService = selectedService appState
+              currentPort = servicePort currentService
+              maybeHeadInfo = find (\h -> hydraHeadPort h == currentPort) (hydraHeads appState)
+          case maybeHeadInfo >>= hydraHeadId of
+            Nothing -> do
+              -- Head is not open, show error message
+              put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "The head is not open for service port " ++ show currentPort], rsTitle = "Close Head Error", rsScrollOffset = 0}}
+            Just headId -> do
+              -- Close the head using the found ID
+              result <- liftIO $ execCloseHead (currentBaseUrl appState) headId
+              -- Refresh Hydra Heads after closing head
+              newHeads <- liftIO $ fetchHydraHeads (services appState)
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Close Head Result", rsScrollOffset = 0}, hydraHeads = newHeads}
+        _ -> return ()
+    ResultScreen _ _ _scrollOffset ->
       case ev of
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
@@ -730,7 +820,7 @@ execOpenHead baseUrl urlsStr = do
   result <- runHydraClient baseUrl $ openHead openHeadReq
   case result of
     Left err -> return $ debugInfo ++ formatError err
-    Right _ -> return $ ["Success!", "Head opened successfully!", ""] ++ debugInfo
+    Right opResp -> return $ ["Success!", "Head opened successfully!", "", "Operation ID: " ++ Text.unpack (operationResponseOperationId opResp), ""] ++ debugInfo
 
 -- | Execute close head
 execCloseHead :: String -> String -> IO [String]
@@ -739,32 +829,43 @@ execCloseHead baseUrl headId = do
   result <- runHydraClient baseUrl $ closeHead headId
   case result of
     Left err -> return $ debugInfo ++ formatError err
-    Right _ -> return $ ["Success!", "Head closed successfully!", ""] ++ debugInfo
+    Right stateResp -> return $ ["Success!", "Head closed successfully!", "", "Status: " ++ Text.unpack (headStateStatus stateResp), ""] ++ debugInfo
 
--- | Execute get head state
-execHeadState :: String -> String -> IO [String]
-execHeadState baseUrl headId = do
-  let debugInfo = formatRequestDebug $ "Head ID: " ++ headId
-  result <- runHydraClient baseUrl $ getHeadState headId
-  case result of
-    Left err -> return $ debugInfo ++ formatError err
-    Right state -> return $ ["Success!", ""] ++ debugInfo ++ ["Status: " ++ show (headStateStatus state)]
+-- | Fetch Hydra Heads for all services
+fetchHydraHeads :: [Service] -> IO [HydraHeadInfo]
+fetchHydraHeads services = do
+  -- Fetch head for each service sequentially
+  mapM fetchHeadForService services
+  where
+    fetchHeadForService :: Service -> IO HydraHeadInfo
+    fetchHeadForService service = do
+      let baseUrl = serviceBaseUrl service
+      result <- runHydraClient baseUrl getHead
+      case result of
+        Left _ -> return $ HydraHeadInfo {hydraHeadPort = servicePort service, hydraHeadId = Nothing}
+        Right maybeHeadId -> return $ HydraHeadInfo {hydraHeadPort = servicePort service, hydraHeadId = maybeHeadId}
 
 -- | Run the TUI application
 runTUI :: [Service] -> IO ()
 runTUI servicesList = do
-  logoContent <- readFile "BlazaLabsAsciiLogo.txt"
-  let logoLines = lines logoContent
+  splashLogoContent <- readFile "./ascii_art/SplashLogo.txt"
+  headerLogoContent <- readFile "./ascii_art/HeaderLogo.txt"
+  let splashLogoLines = lines splashLogoContent
+      headerLogoLines = lines headerLogoContent
       -- Ensure we have at least one service
       defaultServices = if null servicesList
                          then [Service "Local" "127.0.0.1" 3001]
                          else servicesList
+  -- Fetch initial Hydra Heads data
+  initialHeads <- fetchHydraHeads defaultServices
   let initialState =
         AppState
           { currentScreen = SplashScreen
           , services = defaultServices
           , selectedServiceIndex = 0
-          , splashLogo = logoLines
+          , splashLogo = splashLogoLines
+          , headerLogo = headerLogoLines
+          , hydraHeads = initialHeads
           }
   let app =
         M.App

@@ -13,6 +13,7 @@ module HydraPay.API.Types
     QueryFundsResponse (..),
     TxBuiltResponse (..),
     HeadStateResponse (..),
+    OperationResponse (..),
     FundsUtxo (..),
 
     -- * Error Types
@@ -275,6 +276,30 @@ instance FromJSON HeadStateResponse where
         { fieldLabelModifier = \s -> case s of
             "headStateStatus" -> "status"
             _ -> camelTo2 '_' $ drop 10 s -- drop "headState"
+        }
+
+-- | Operation response (for open-head and close-head)
+data OperationResponse = OperationResponse
+  { operationResponseOperationId :: Text
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON OperationResponse where
+  toJSON =
+    genericToJSON
+      defaultOptions
+        { fieldLabelModifier = \s -> case s of
+            "operationResponseOperationId" -> "operationId"
+            _ -> camelTo2 '_' $ drop 19 s -- drop "operationResponse"
+        }
+
+instance FromJSON OperationResponse where
+  parseJSON =
+    genericParseJSON
+      defaultOptions
+        { fieldLabelModifier = \s -> case s of
+            "operationResponseOperationId" -> "operationId"
+            _ -> camelTo2 '_' $ drop 19 s -- drop "operationResponse"
         }
 
 -- | Transaction built response

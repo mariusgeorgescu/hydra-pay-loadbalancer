@@ -8,6 +8,7 @@ module HydraPay.Client
   , payMerchant
   , openHead
   , closeHead
+  , getHead
   , getHeadState
     
   -- * Client runner
@@ -35,7 +36,6 @@ import Network.HTTP.Types (methodPost, statusCode)
 import Network.HTTP.Types.Header (HeaderName, RequestHeaders)
 import Servant.Client
 import Servant.Client.Core (ClientError(..))
-import Servant (NoContent)
 import Servant.API
 
 import HydraPay.API
@@ -52,12 +52,13 @@ queryFunds :: String -> ClientM QueryFundsResponse
 deposit' :: DepositSchema -> ClientM TxBuiltResponse
 withdraw :: WithdrawSchema -> ClientM TxBuiltResponse
 payMerchant :: PayMerchantSchema -> ClientM TxBuiltResponse
-openHead :: ManageHeadSchema -> ClientM NoContent
-closeHead :: String -> ClientM NoContent  -- Takes head ID as query parameter
+openHead :: ManageHeadSchema -> ClientM OperationResponse
+closeHead :: String -> ClientM HeadStateResponse  -- Takes head ID as query parameter, returns status
+getHead :: ClientM (Maybe String)  -- Returns head ID if RUNNING, null otherwise
 getHeadState :: String -> ClientM HeadStateResponse  -- Takes head ID as query parameter
 
 -- Generate client from API definition
-(queryFunds :<|> deposit' :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead :<|> getHeadState) = client hydraAPI
+(queryFunds :<|> deposit' :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead :<|> getHead :<|> getHeadState) = client hydraAPI
 
 -- Exported wrapper (keeping original name for compatibility)
 deposit :: DepositSchema -> ClientM TxBuiltResponse

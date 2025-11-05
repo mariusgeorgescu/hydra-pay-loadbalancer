@@ -14,8 +14,9 @@ type HydraAPI =
   :<|> "deposit" :> ReqBody '[JSON] DepositSchema :> Post '[JSON] TxBuiltResponse
   :<|> "withdraw" :> ReqBody '[JSON] WithdrawSchema :> Post '[JSON] TxBuiltResponse
   :<|> "pay-merchant" :> ReqBody '[JSON] PayMerchantSchema :> Post '[JSON] TxBuiltResponse
-  :<|> "open-head" :> ReqBody '[JSON] ManageHeadSchema :> Post '[JSON] NoContent
-  :<|> "close-head" :> QueryParam' '[Required] "id" String :> Post '[JSON] NoContent
+  :<|> "open-head" :> ReqBody '[JSON] ManageHeadSchema :> Post '[JSON] OperationResponse
+  :<|> "close-head" :> QueryParam' '[Required] "id" String :> Post '[JSON] HeadStateResponse
+  :<|> "get-head" :> Get '[JSON] (Maybe String)
   :<|> "state" :> QueryParam' '[Required] "id" String :> Get '[JSON] HeadStateResponse
 
 -- | Proxy for the API type
