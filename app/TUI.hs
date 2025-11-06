@@ -36,7 +36,6 @@ import HydraPay.API.Types (HeadStateResponse(..), ManageHeadSchema(..), Operatio
 import HydraPay.Database (initDatabase, insertCommittedDeposits, deleteDepositsByServicePort, getDepositsByServicePort, runDB)
 import HydraPay.Operations (execQueryFunds, execDeposit, execWithdraw, execPayMerchant, execOpenHead, execCloseHead)
 import Database.Persist.Sqlite qualified as Sqlite
-import MyLib
 import System.IO
 import Data.Maybe (mapMaybe)
 import qualified Data.Maybe

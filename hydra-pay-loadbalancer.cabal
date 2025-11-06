@@ -22,7 +22,6 @@ common warnings
 library
   import:           warnings
   exposed-modules:  
-    MyLib
     HydraPay.API
     HydraPay.API.Types
     HydraPay.Client
