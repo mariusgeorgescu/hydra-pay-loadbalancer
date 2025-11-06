@@ -10,7 +10,7 @@ import Control.Monad.Except (throwError)
 import HydraPay.API
 import HydraPay.API.Types
 import HydraPay.ServiceScanner (scanAvailableServices, Service, serviceBaseUrl, serviceName)
-import HydraPay.Client (queryFunds, withdraw, runHydraClient, HydraClientError(..), formatError)
+import HydraPay.Client (queryFunds, deposit, withdraw, payMerchant, runHydraClient, HydraClientError(..), formatError)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, writeTVar, atomically)
 import Control.Monad (forever)
@@ -117,9 +117,26 @@ aggregateQueryFundsResponse r1 r2 =
     , queryFundsTotalInL2 = aggregateJsonObjects (queryFundsTotalInL2 r1) (queryFundsTotalInL2 r2)  -- Aggregate L2
     }
 
--- | Deposit handler
+-- | Deposit handler - forwards request to first available service
 depositHandler :: ServerState -> DepositSchema -> Handler TxBuiltResponse
-depositHandler _ _ = undefined
+depositHandler state depositReq = do
+  -- Read current list of services
+  services <- liftIO $ readTVarIO (serverServices state)
+  
+  case services of
+    [] -> do
+      -- No services available
+      throwError err503 { errBody = BL.fromStrict $ encodeUtf8 $ pack "No services available" }
+    (firstService:_) -> do
+      -- Forward request to first available service
+      let baseUrl = serviceBaseUrl firstService
+      result <- liftIO $ runHydraClient baseUrl $ deposit depositReq
+      case result of
+        Left err -> do
+          -- Forward error from service
+          let errorMsg = unlines $ formatError err
+          throwError err502 { errBody = BL.fromStrict $ encodeUtf8 $ pack errorMsg }
+        Right txBuilt -> return txBuilt
 
 -- | Withdraw handler - forwards request to first available service
 withdrawHandler :: ServerState -> WithdrawSchema -> Handler TxBuiltResponse
@@ -142,9 +159,49 @@ withdrawHandler state withdrawReq = do
           throwError err502 { errBody = BL.fromStrict $ encodeUtf8 $ pack errorMsg }
         Right txBuilt -> return txBuilt
 
--- | Pay merchant handler
+-- | Pay merchant handler - forwards request to all available services
+-- Returns success if at least one service succeeds, otherwise returns error
 payMerchantHandler :: ServerState -> PayMerchantSchema -> Handler TxBuiltResponse
-payMerchantHandler _ _ = undefined
+payMerchantHandler state payMerchantReq = do
+  -- Read current list of services
+  services <- liftIO $ readTVarIO (serverServices state)
+  
+  if null services
+    then do
+      -- No services available
+      throwError err503 { errBody = BL.fromStrict $ encodeUtf8 $ pack "No services available" }
+    else do
+      -- Try all services and collect results
+      results <- liftIO $ mapM (tryPayMerchant payMerchantReq) services
+      
+      -- Find first successful result
+      case findSuccess results of
+        Just txBuilt -> return txBuilt
+        Nothing -> do
+          -- All services failed, aggregate errors
+          let errors = mapMaybe getError results
+          let errorMsg = if null errors
+                then "All services failed (no error details available)"
+                else unlines $ ["All services failed:"] ++ concatMap formatError errors
+          throwError err502 { errBody = BL.fromStrict $ encodeUtf8 $ pack errorMsg }
+
+-- | Try pay merchant on a single service
+tryPayMerchant :: PayMerchantSchema -> Service -> IO (Either HydraClientError TxBuiltResponse)
+tryPayMerchant payMerchantReq service = do
+  let baseUrl = serviceBaseUrl service
+  result <- runHydraClient baseUrl $ payMerchant payMerchantReq
+  return result
+
+-- | Find first successful result
+findSuccess :: [Either HydraClientError TxBuiltResponse] -> Maybe TxBuiltResponse
+findSuccess [] = Nothing
+findSuccess (Right txBuilt : _) = Just txBuilt
+findSuccess (_ : rest) = findSuccess rest
+
+-- | Extract error from result
+getError :: Either HydraClientError TxBuiltResponse -> Maybe HydraClientError
+getError (Left err) = Just err
+getError (Right _) = Nothing
 
 -- | Update services list by scanning
 updateServices :: TVar [Service] -> IO ()
