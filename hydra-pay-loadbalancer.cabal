@@ -113,9 +113,11 @@ executable server
     , wai
     , warp
     , text
+    , bytestring
     , stm
     , aeson
     , vector
+    , mtl
 
   hs-source-dirs:   app
   default-language: GHC2021
