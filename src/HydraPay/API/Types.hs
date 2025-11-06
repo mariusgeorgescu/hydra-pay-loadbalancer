@@ -243,7 +243,12 @@ instance ToJSON QueryFundsResponse where
   toJSON =
     genericToJSON
       defaultOptions
-        { fieldLabelModifier = camelTo2 '_' . drop 10 -- drop "queryFunds"
+        { fieldLabelModifier = \s -> case s of
+            "queryFundsFundsInL1" -> "fundsInL1"
+            "queryFundsFundsInL2" -> "fundsInL2"
+            "queryFundsTotalInL1" -> "totalInL1"
+            "queryFundsTotalInL2" -> "totalInL2"
+            _ -> camelTo2 '_' $ drop 10 s -- drop "queryFunds"
         }
 
 instance FromJSON QueryFundsResponse where
