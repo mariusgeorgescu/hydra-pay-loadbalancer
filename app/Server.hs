@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
@@ -7,10 +8,16 @@ import Servant
 import HydraPay.API
 import HydraPay.API.Types
 import HydraPay.ServiceScanner (scanAvailableServices, Service, serviceBaseUrl, serviceName)
+import HydraPay.Client (queryFunds, runHydraClient)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, writeTVar, atomically)
 import Control.Monad (forever)
+import Control.Monad.IO.Class (liftIO)
 import System.IO (hPutStrLn, stderr)
+import Data.Aeson (Value(..), object)
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Vector as Vec
+import Data.Maybe (mapMaybe)
 
 -- | Server state containing available services
 data ServerState = ServerState
@@ -25,9 +32,85 @@ server state =
   :<|> withdrawHandler state
   :<|> payMerchantHandler state
 
--- | Query funds handler
+-- | Aggregate two JSON objects by adding values with the same keys
+aggregateJsonObjects :: Value -> Value -> Value
+aggregateJsonObjects (Object obj1) (Object obj2) =
+  let
+    -- Start with obj1, then merge obj2 into it
+    combined = foldl addToMap obj1 (KM.toList obj2)
+    addToMap acc (key, val) =
+      case KM.lookup key acc of
+        Just (Number n1) | Number n2 <- val ->
+          -- Both are numbers: add them
+          KM.insert key (Number (n1 + n2)) acc
+        Just (Object o1) | Object o2 <- val ->
+          -- Both are objects: recursively aggregate
+          KM.insert key (aggregateJsonObjects (Object o1) (Object o2)) acc
+        Just _ ->
+          -- Key exists but types don't match: keep first value
+          acc
+        Nothing ->
+          -- Key doesn't exist: add it
+          KM.insert key val acc
+  in Object combined
+aggregateJsonObjects val1 _ = val1  -- Fallback: return first value if not objects
+
+-- | Query funds handler - aggregates results from all available services
 queryFundsHandler :: ServerState -> String -> Handler QueryFundsResponse
-queryFundsHandler _ _ = undefined
+queryFundsHandler state address = do
+  -- Read current list of services
+  services <- liftIO $ readTVarIO (serverServices state)
+  
+  if null services
+    then do
+      -- Return empty response if no services available
+      return $ QueryFundsResponse
+        { queryFundsFundsInL1 = Vec.empty
+        , queryFundsFundsInL2 = Vec.empty
+        , queryFundsTotalInL1 = object []
+        , queryFundsTotalInL2 = object []
+        }
+    else do
+      -- Query all services and collect results
+      results <- liftIO $ mapM (queryServiceFunds address) services
+      
+      -- Filter out errors and aggregate successful results
+      let successfulResults = mapMaybe id results
+      
+      if null successfulResults
+        then do
+          -- Return empty response if all queries failed
+          return $ QueryFundsResponse
+            { queryFundsFundsInL1 = Vec.empty
+            , queryFundsFundsInL2 = Vec.empty
+            , queryFundsTotalInL1 = object []
+            , queryFundsTotalInL2 = object []
+            }
+        else do
+          -- Aggregate results (only L2 values are aggregated, L1 kept from first response)
+          let aggregated = foldl1 aggregateQueryFundsResponse successfulResults
+          return aggregated
+
+-- | Query funds from a single service
+queryServiceFunds :: String -> Service -> IO (Maybe QueryFundsResponse)
+queryServiceFunds address service = do
+  let baseUrl = serviceBaseUrl service
+  result <- runHydraClient baseUrl $ queryFunds address
+  case result of
+    Left _ -> return Nothing  -- Ignore errors, continue with other services
+    Right funds -> return $ Just funds
+
+-- | Aggregate two QueryFundsResponse values
+-- Only aggregates L2 values (fundsInL2 and totalInL2)
+-- L1 values are kept from the first response (or empty)
+aggregateQueryFundsResponse :: QueryFundsResponse -> QueryFundsResponse -> QueryFundsResponse
+aggregateQueryFundsResponse r1 r2 =
+  QueryFundsResponse
+    { queryFundsFundsInL1 = queryFundsFundsInL1 r1  -- Keep L1 from first response
+    , queryFundsFundsInL2 = queryFundsFundsInL2 r1 Vec.++ queryFundsFundsInL2 r2  -- Aggregate L2
+    , queryFundsTotalInL1 = queryFundsTotalInL1 r1  -- Keep L1 from first response
+    , queryFundsTotalInL2 = aggregateJsonObjects (queryFundsTotalInL2 r1) (queryFundsTotalInL2 r2)  -- Aggregate L2
+    }
 
 -- | Deposit handler
 depositHandler :: ServerState -> DepositSchema -> Handler TxBuiltResponse
