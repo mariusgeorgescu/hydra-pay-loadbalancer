@@ -29,6 +29,7 @@ library
     HydraPay.Client.Deposit
     HydraPay.Database
     HydraPay.Operations
+    HydraPay.ServiceScanner
 
   -- other-modules:
   -- other-extensions:
@@ -55,7 +56,7 @@ library
   hs-source-dirs:   src
   default-language: GHC2021
 
-executable hydra-pay-loadbalancer
+executable tui
   import:           warnings
   main-is:          Main.hs
   other-modules:    TUI
@@ -95,6 +96,24 @@ executable hydra-pay-loadbalancer
     , vty
     , wai
     , warp
+
+  hs-source-dirs:   app
+  default-language: GHC2021
+
+executable server
+  import:           warnings
+  main-is:          Server.hs
+  -- other-extensions:
+  ghc-options:      -threaded
+  
+  build-depends:
+    , base                    ^>=4.18.2.0
+    , hydra-pay-loadbalancer
+    , servant-server          ^>=0.20
+    , wai
+    , warp
+    , text
+    , stm
 
   hs-source-dirs:   app
   default-language: GHC2021
