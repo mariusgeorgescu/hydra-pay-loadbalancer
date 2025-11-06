@@ -28,6 +28,8 @@ library
     HydraPay.Client
     HydraPay.Client.Logger
     HydraPay.Client.Deposit
+    HydraPay.Database
+    HydraPay.Operations
 
   -- other-modules:
   -- other-extensions:
@@ -48,6 +50,9 @@ library
     , text                    ^>=2.0
     , time                    ^>=1.12
     , vector                  ^>=0.13
+    , persistent
+    , persistent-sqlite
+    , monad-logger
   hs-source-dirs:   src
   default-language: GHC2021
 
@@ -77,6 +82,7 @@ executable hydra-pay-loadbalancer
     , mtl
     , multiset
     , persistent
+    , persistent-sqlite
     , persistent-postgresql
     , servant-client-core
     , servant-options

@@ -23,22 +23,22 @@ import Brick.Widgets.Edit qualified as E
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put, modify)
-import Data.Aeson (encode, toJSON, ToJSON)
-import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.List (isInfixOf, find)
+import HydraPay.Client (runHydraClient, HydraClientError(..), formatError, getHeadState, getHead, getUncommittedDeposits)
 import Data.Text qualified as Text
-import Data.Text.Lazy qualified as TL
-import Data.Text.Lazy.Encoding qualified as TLE
 import Data.Vector qualified as Vec
 import Graphics.Vty qualified as V
 import Control.Concurrent (threadDelay)
 import Control.Exception (catch, SomeException)
 import qualified Network.HTTP.Client as HTTP
 import Network.HTTP.Types (statusCode)
-import HydraPay.API.Types (HeadStateResponse(..))
-import HydraPay.Client (runHydraClient, HydraClientError(..), formatError, getHeadState, getHead)
+import HydraPay.API.Types (HeadStateResponse(..), ManageHeadSchema(..), OperationResponse(..), UncommittedDepositsResponse(..), UncommittedDeposit(..), TxOutRef(..))
+import HydraPay.Database (initDatabase, insertCommittedDeposits, deleteDepositsByServicePort, getDepositsByServicePort, runDB)
+import HydraPay.Operations (execQueryFunds, execDeposit, execWithdraw, execPayMerchant, execOpenHead, execCloseHead)
+import Database.Persist.Sqlite qualified as Sqlite
 import MyLib
 import System.IO
+import Data.Maybe (mapMaybe)
 import qualified Data.Maybe
 
 -- | Service configuration
@@ -55,6 +55,12 @@ data HydraHeadInfo = HydraHeadInfo
   , hydraHeadId :: Maybe String  -- Nothing means "Closed", Just id means active head
   }
   deriving (Eq, Show)
+
+-- | Users by head ID mapping
+type UsersByHead = [(String, [String])]  -- (headId, [addresses])
+
+-- | Pending deposits (uncommitted deposits)
+type PendingDeposits = [UncommittedDeposit]
 
 -- | Get base URL for a service
 serviceBaseUrl :: Service -> String
@@ -124,7 +130,10 @@ data ResourceName
   | OpenHeadUrlsField
   | CloseHeadIdField
   | ResultViewport  -- Viewport for scrolling result screens
-  | ActionsViewport  -- Viewport for scrolling Actions menu
+  | UserActionsViewport  -- Viewport for scrolling User Actions menu
+  | AdminActionsViewport  -- Viewport for scrolling Admin Actions menu
+  | UsersByHeadViewport  -- Viewport for scrolling Users By Head widget
+  | PendingDepositsViewport  -- Viewport for scrolling Pending Deposits widget
   deriving (Eq, Ord, Show)
 
 -- | Current screen shown to the user
@@ -157,8 +166,15 @@ data AppState = AppState
   , splashLogo :: [String]
   , headerLogo :: [String]  -- Header logo for main screen
   , hydraHeads :: [HydraHeadInfo]  -- Cached Hydra Heads data
-  }
-  deriving (Show)
+  , dbPool :: Sqlite.ConnectionPool  -- Database connection pool
+  , usersByHead :: UsersByHead  -- Cached users by head ID
+  , pendingDeposits :: PendingDeposits  -- Cached uncommitted deposits
+  , refreshCounter :: Int  -- Counter to force re-render on refresh
+  } deriving (Show)
+
+instance Show Sqlite.ConnectionPool  where
+  show _ = "ConnectionPool"
+
 
 -- | Get the currently selected service
 selectedService :: AppState -> Service
@@ -243,36 +259,51 @@ drawMainMenu :: [HydraHeadInfo] -> AppState -> T.Widget ResourceName
 drawMainMenu heads appState =
   let -- Header logo (centered and cyan colored)
       logoWidget = C.center $ W.withAttr (A.attrName "cyan") $ W.vBox $ map W.str (headerLogo appState)
-      
-      -- Dashboard zone (top): Hydra Heads widget
+
+      -- Dashboard zone (top): Hydra Heads widget, Users By Head widget, and Pending Deposits widget
       headsTable = drawHydraHeadsTable heads
-      dashboardZone = B.borderWithLabel (W.str "Dashboard") headsTable
-      
-      -- Actions menu (right side) with scrollbar
-      menuOptions = W.vBox
-        [ W.str "Select an operation:"
+      usersByHeadWidget = drawUsersByHeadWidget heads appState
+      pendingDepositsWidget = drawPendingDepositsWidget appState
+      dashboardZone = B.borderWithLabel (W.str "Dashboard") $
+        W.hBox [headsTable, W.str "  ", usersByHeadWidget, W.str "  ", pendingDepositsWidget]
+
+      -- User Actions menu (left side of actions area)
+      userActionsMenu = W.vBox
+        [ W.str "User Actions:"
         , W.str ""
-        , W.str "  1. Query Funds"
-        , W.str "  2. Deposit"
-        , W.str "  3. Withdraw"
+        , W.str "  1. Query Balance"
+        , W.str "  2. Deposit Funds"
+        , W.str "  3. Withdraw Funds"
         , W.str "  4. Pay Merchant"
+        ]
+      userActionsViewport = W.viewport UserActionsViewport T.Vertical userActionsMenu
+      userActionsViewportWithScrollbar = W.withVScrollBars T.OnRight userActionsViewport
+      userActionsBox = B.borderWithLabel (W.str "User Actions") userActionsViewportWithScrollbar
+
+      -- Admin Actions menu (right side of actions area)
+      adminActionsMenu = W.vBox
+        [ W.str "Admin Actions:"
+        , W.str ""
         , W.str "  5. Open Head"
         , W.str "  6. Close Head"
         , W.str ""
-        , W.str "  r. Refresh Heads"
+        , W.str "  r. Refresh"
         , W.str "  q. Quit"
         ]
-      viewportWidget = W.viewport ActionsViewport T.Vertical menuOptions
-      viewportWithScrollbar = W.withVScrollBars T.OnRight viewportWidget
-      actionsBox = B.borderWithLabel (W.str "Actions") viewportWithScrollbar
-      
+      adminActionsViewport = W.viewport AdminActionsViewport T.Vertical adminActionsMenu
+      adminActionsViewportWithScrollbar = W.withVScrollBars T.OnRight adminActionsViewport
+      adminActionsBox = B.borderWithLabel (W.str "Admin Actions") adminActionsViewportWithScrollbar
+
       -- Services widget (left side)
       servicesWidget = drawServicesPanel appState
-      
+
+      -- Actions zone: User Actions and Admin Actions side by side
+      actionsZone = W.hBox [userActionsBox, W.str "  ", adminActionsBox]
+
       -- Admin zone (bottom): Services on left, Actions on right
       adminZone = B.borderWithLabel (W.str "Admin") $
-        W.hBox [servicesWidget, W.str "  ", actionsBox]
-      
+        W.hBox [servicesWidget, W.str "  ", actionsZone]
+
       -- Full layout: Logo centered on top, Dashboard and Admin centered horizontally
   in W.vBox
        [ logoWidget
@@ -282,40 +313,105 @@ drawMainMenu heads appState =
        , C.center adminZone
        ]
 
+-- | Users By Head widget - shows addresses for each head
+drawUsersByHeadWidget :: [HydraHeadInfo] -> AppState -> T.Widget ResourceName
+drawUsersByHeadWidget heads appState =
+  let -- Build content for each head using cached data
+      buildHeadContent :: HydraHeadInfo -> [String]
+      buildHeadContent headInfo =
+        case hydraHeadId headInfo of
+          Nothing -> []  -- Skip closed heads
+          Just headId -> 
+            let header = "Service " ++ show (hydraHeadPort headInfo) ++ " (" ++ headId ++ "):"
+                addresses = Data.Maybe.fromMaybe [] $ lookup headId (usersByHead appState)
+            in if null addresses
+               then [header, "  No users"]
+               else header : map ("  " ++) addresses
+
+      -- Filter only open heads
+      openHeads = filter (\h -> Data.Maybe.isJust (hydraHeadId h)) heads
+      
+      -- Build all content for open heads
+      allContent = concatMap buildHeadContent openHeads
+      
+      -- If no content, show a message
+      finalContent = if null allContent
+                     then ["No open heads"]
+                     else allContent
+
+      contentWidget = W.vBox $ map W.str finalContent
+      viewportWidget = W.viewport UsersByHeadViewport T.Vertical contentWidget
+      viewportWithScrollbar = W.withVScrollBars T.OnRight viewportWidget
+  in B.borderWithLabel (W.str "Users By Head") viewportWithScrollbar
+
+-- | Pending Deposits widget - shows uncommitted deposits
+drawPendingDepositsWidget :: AppState -> T.Widget ResourceName
+drawPendingDepositsWidget appState =
+  let -- Build content for each pending deposit
+      buildDepositContent :: UncommittedDeposit -> [String]
+      buildDepositContent uncommittedDep =
+        let addr = Text.unpack $ uncommittedDepositAddress uncommittedDep
+            amountList = uncommittedDepositAmount uncommittedDep
+            amountStr = if null amountList
+                       then "No amount"
+                       else unwords $ map (\(unit, val) -> Text.unpack unit ++ ":" ++ show val) amountList
+            utxoRef = uncommittedDepositFundsUtxoRef uncommittedDep
+            utxoStr = case utxoRef of
+              Just ref -> Text.unpack (txOutRefHash ref) ++ ":" ++ show (txOutRefIndex ref)
+              Nothing -> "N/A"
+        in [ "Address: " ++ addr
+           , "  Amount: " ++ amountStr
+           , "  UTxO: " ++ utxoStr
+           , ""
+           ]
+
+      -- Build all content
+      depositCount = length (pendingDeposits appState)
+      debugInfo = "Total: " ++ show depositCount ++ " deposits"
+      allContent = if null (pendingDeposits appState)
+                   then ["No pending deposits", "", debugInfo]
+                   else debugInfo : "" : concatMap buildDepositContent (pendingDeposits appState)
+
+      contentWidget = W.vBox $ map W.str allContent
+      viewportWidget = W.viewport PendingDepositsViewport T.Vertical contentWidget
+      viewportWithScrollbar = W.withVScrollBars T.OnRight viewportWidget
+  in B.borderWithLabel (W.str "Pending Deposits") viewportWithScrollbar
+
 -- | Hydra Heads table widget (compact version for main menu)
 drawHydraHeadsTable :: [HydraHeadInfo] -> T.Widget ResourceName
 drawHydraHeadsTable heads =
   let -- Helper function to pad a string to a fixed width (left-aligned)
       padToWidth :: Int -> String -> String
       padToWidth width s = s ++ replicate (max 0 (width - length s)) ' '
-      
+
       -- Calculate column widths (very compact)
       portColWidth = 8
       headIdColWidth = 30
-      
+
       -- Create a cell widget (no padding)
       makeCell :: Int -> String -> T.Widget ResourceName
       makeCell width content = W.str $ padToWidth width content
-      
+
       -- Create header row (compact headers, no border)
       headerPort = makeCell portColWidth "Port"
       headerHeadId = makeCell headIdColWidth "HeadID"
       headerRow = W.hBox [headerPort, W.str " | ", headerHeadId]
-      
+
       -- Render a data row (no borders for compactness)
       renderRow headInfo =
         let portStr = show (hydraHeadPort headInfo)
             (headIdStr, headIdAttr) = case hydraHeadId headInfo of
               Nothing -> ("Closed", A.attrName "headClosed")
+              Just "OPENING" -> ("OPENING", A.attrName "headOpening")
               Just headId -> ( headId, A.attrName "headOpen")
             portCell = makeCell portColWidth portStr
             headIdCell = W.withAttr headIdAttr $ makeCell headIdColWidth headIdStr
         in W.hBox [portCell, W.str " | ", headIdCell]
-      
+
       -- Create all rows: header, then data rows
       dataRows = map renderRow heads
       allRows = headerRow : dataRows
-      
+
       -- Create table content (ultra compact, no borders)
       tableContent = W.vBox allRows
   in B.borderWithLabel (W.str "Hydra Heads") tableContent
@@ -466,8 +562,10 @@ theMap :: A.AttrMap
 theMap =
   A.attrMap V.defAttr
     [ (A.attrName "cyan", Util.fg V.cyan)
-    , (A.attrName "selected", Util.fg V.green `V.withStyle` V.bold)
+    , (A.attrName "selected", Util.fg V.cyan `V.withStyle` V.bold)
     , (A.attrName "headOpen", Util.fg V.yellow)
+    , (A.attrName "headOpening", Util.fg V.yellow)
+    , (A.attrName "headOpen", Util.fg V.green)
     , (A.attrName "headClosed", Util.fg V.red)
     ]
 
@@ -546,26 +644,51 @@ handleEvent ev = do
         (T.VtyEvent (V.EvKey (V.KChar '6') [])) -> do
           put $ appState {currentScreen = CloseHeadFormScreen}
         (T.VtyEvent (V.EvKey (V.KChar 'r') [])) -> do
-          -- Refresh Hydra Heads data
+          -- Refresh Hydra Heads data, users by head, and pending deposits
           newHeads <- liftIO $ fetchHydraHeads (services appState)
-          put $ appState {hydraHeads = newHeads}
+          -- Persist deposits for any open heads that don't have deposits in the database yet
+          liftIO $ persistMissingDeposits (dbPool appState) (services appState) newHeads
+          newUsersByHead <- liftIO $ fetchUsersByHead (dbPool appState) newHeads
+          -- Fetch pending deposits from the currently selected service
+          newPendingDeposits <- liftIO $ fetchPendingDeposits (currentBaseUrl appState)
+          -- Force re-render by incrementing refresh counter even if data didn't change
+          let newRefreshCounter = refreshCounter appState + 1
+          put $ appState {hydraHeads = newHeads, usersByHead = newUsersByHead, pendingDeposits = newPendingDeposits, refreshCounter = newRefreshCounter}
         (T.VtyEvent (V.EvKey (V.KChar 'q') [])) -> M.halt
         (T.VtyEvent (V.EvKey V.KEsc [])) -> M.halt
-        -- Allow scrolling in Actions viewport
+        -- Allow scrolling in User Actions viewport
         (T.VtyEvent (V.EvKey V.KUp [])) -> do
-          vScrollBy (viewportScroll ActionsViewport) (-1)
+          vScrollBy (viewportScroll UserActionsViewport) (-1)
         (T.VtyEvent (V.EvKey V.KDown [])) -> do
-          vScrollBy (viewportScroll ActionsViewport) 1
+          vScrollBy (viewportScroll UserActionsViewport) 1
         (T.VtyEvent (V.EvKey V.KPageUp [])) -> do
-          vScrollBy (viewportScroll ActionsViewport) (-5)
+          vScrollBy (viewportScroll UserActionsViewport) (-5)
         (T.VtyEvent (V.EvKey V.KPageDown [])) -> do
-          vScrollBy (viewportScroll ActionsViewport) 5
+          vScrollBy (viewportScroll UserActionsViewport) 5
+        -- Allow scrolling in Admin Actions viewport
+        (T.VtyEvent (V.EvKey (V.KChar 'a') [])) -> do
+          vScrollBy (viewportScroll AdminActionsViewport) (-1)
+        (T.VtyEvent (V.EvKey (V.KChar 's') [])) -> do
+          vScrollBy (viewportScroll AdminActionsViewport) 1
+        -- Allow scrolling in UsersByHead viewport (only when on main menu)
+        (T.VtyEvent (V.EvKey (V.KChar 'u') [])) -> do
+          vScrollBy (viewportScroll UsersByHeadViewport) (-1)
+        (T.VtyEvent (V.EvKey (V.KChar 'd') [])) -> do
+          vScrollBy (viewportScroll UsersByHeadViewport) 1
+        -- Allow scrolling in PendingDeposits viewport (only when on main menu)
+        (T.VtyEvent (V.EvKey (V.KChar 'p') [])) -> do
+          vScrollBy (viewportScroll PendingDepositsViewport) (-1)
+        (T.VtyEvent (V.EvKey (V.KChar 'n') [])) -> do
+          vScrollBy (viewportScroll PendingDepositsViewport) 1
         (T.VtyEvent (V.EvKey (V.KChar '\t') [])) -> do
           -- Switch to next service
           let currentIdx = selectedServiceIndex appState
               numServices = length (services appState)
               nextIdx = (currentIdx + 1) `mod` numServices
-          put $ appState {selectedServiceIndex = nextIdx}
+          -- Update pending deposits for the new service
+          newPendingDeposits <- liftIO $ fetchPendingDeposits (serviceBaseUrl $ services appState !! nextIdx)
+          let newRefreshCounter = refreshCounter appState + 1
+          put $ appState {selectedServiceIndex = nextIdx, pendingDeposits = newPendingDeposits, refreshCounter = newRefreshCounter}
         _ -> return ()
     QueryFundsFormScreen edit ->
       case ev of
@@ -658,11 +781,26 @@ handleEvent ev = do
         (T.VtyEvent (V.EvKey V.KEsc [])) -> do
           put $ appState {currentScreen = MainMenuScreen}
         (T.VtyEvent (V.EvKey V.KEnter [])) -> do
-          let urls = getEditorText edit
-          result <- liftIO $ execOpenHead (currentBaseUrl appState) urls
-          -- Refresh Hydra Heads after opening head
-          newHeads <- liftIO $ fetchHydraHeads (services appState)
-          put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Open Head Result", rsScrollOffset = 0}, hydraHeads = newHeads}
+          -- Check if head is already open for the current service
+          let currentService = selectedService appState
+              currentPort = servicePort currentService
+              maybeHeadInfo = find (\h -> hydraHeadPort h == currentPort) (hydraHeads appState)
+          case maybeHeadInfo >>= hydraHeadId of
+            Just headId -> do
+              -- Head is already open, show error message
+              put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "Head is already open", "", "Head ID: " ++ headId, "Service Port: " ++ show currentPort], rsTitle = "Open Head Error", rsScrollOffset = 0}}
+            Nothing -> do
+              -- No head open, proceed with opening
+              let urls = getEditorText edit
+                  currentService = selectedService appState
+                  servicePort' = servicePort currentService
+              result <- liftIO $ execOpenHead (dbPool appState) servicePort' (currentBaseUrl appState) urls
+              -- Refresh Hydra Heads, users by head, and pending deposits after opening head
+              newHeads <- liftIO $ fetchHydraHeads (services appState)
+              newUsersByHead <- liftIO $ fetchUsersByHead (dbPool appState) newHeads
+              newPendingDeposits <- liftIO $ fetchPendingDeposits (currentBaseUrl appState)
+              let newRefreshCounter = refreshCounter appState + 1
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Open Head Result", rsScrollOffset = 0}, hydraHeads = newHeads, usersByHead = newUsersByHead, pendingDeposits = newPendingDeposits, refreshCounter = newRefreshCounter}
         _ -> do
           newEdit <- handleEditorEvent ev edit
           put $ appState {currentScreen = OpenHeadFormScreen {ohEdit = newEdit}}
@@ -681,10 +819,15 @@ handleEvent ev = do
               put $ appState {currentScreen = ResultScreen {rsMessage = ["Error", "The head is not open for service port " ++ show currentPort], rsTitle = "Close Head Error", rsScrollOffset = 0}}
             Just headId -> do
               -- Close the head using the found ID
-              result <- liftIO $ execCloseHead (currentBaseUrl appState) headId
-              -- Refresh Hydra Heads after closing head
+              let currentService = selectedService appState
+                  servicePort' = servicePort currentService
+              result <- liftIO $ execCloseHead (dbPool appState) servicePort' (currentBaseUrl appState) headId
+              -- Refresh Hydra Heads, users by head, and pending deposits after closing head
               newHeads <- liftIO $ fetchHydraHeads (services appState)
-              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Close Head Result", rsScrollOffset = 0}, hydraHeads = newHeads}
+              newUsersByHead <- liftIO $ fetchUsersByHead (dbPool appState) newHeads
+              newPendingDeposits <- liftIO $ fetchPendingDeposits (currentBaseUrl appState)
+              let newRefreshCounter = refreshCounter appState + 1
+              put $ appState {currentScreen = ResultScreen {rsMessage = result, rsTitle = "Close Head Result", rsScrollOffset = 0}, hydraHeads = newHeads, usersByHead = newUsersByHead, pendingDeposits = newPendingDeposits, refreshCounter = newRefreshCounter}
         _ -> return ()
     ResultScreen _ _ _scrollOffset ->
       case ev of
@@ -710,127 +853,6 @@ handleEditorEvent ev edit = do
   (newEditor, _) <- T.nestEventM edit $ E.handleEditorEvent ev
   return newEditor
 
--- | Helper to format request debug info (for ToJSON requests)
-formatRequestJsonDebug :: ToJSON req => req -> [String]
-formatRequestJsonDebug req =
-  let debugJsonPretty = TL.unpack $ TLE.decodeUtf8 $ encodePretty req
-      debugJsonCompact = TL.unpack $ TLE.decodeUtf8 $ encode req
-  in ["Request JSON (Compact):", debugJsonCompact, "", "Request JSON (Pretty):", debugJsonPretty, ""]
-
--- | Helper to format request debug info (for non-ToJSON requests like query-funds)
-formatRequestDebug :: String -> [String]
-formatRequestDebug requestStr = ["Request:", requestStr, ""]
-
--- | Execute a client action with debug info and error formatting
--- This helper consolidates the common pattern of:
--- 1. Building a request
--- 2. Encoding it to JSON for debug output
--- 3. Running the client action
--- 4. Formatting success/error responses
-execWithDebug :: (ToJSON req, ToJSON res) => String -> req -> (req -> IO (Either HydraClientError res)) -> IO [String]
-execWithDebug _baseUrl req clientFn = do
-  let debugInfo = formatRequestJsonDebug req
-  result <- clientFn req
-
-  case result of
-    Right res ->
-      return $ ["Success!", ""] ++ debugInfo ++ [TL.unpack $ TLE.decodeUtf8 $ encodePretty res]
-    Left err ->
-      return $ debugInfo ++ formatError err
-
--- | Execute query funds
-execQueryFunds :: String -> String -> IO [String]
-execQueryFunds baseUrl addr = do
-  let debugInfo = formatRequestDebug $ "Address: " ++ addr
-  result <- runHydraClient baseUrl $ queryFunds addr
-  case result of
-    Left err -> return $ debugInfo ++ formatError err
-    Right funds -> return $ ["Success!", ""] ++ debugInfo ++ [TL.unpack $ TLE.decodeUtf8 $ encodePretty funds]
-
--- | Execute deposit
-execDeposit :: String -> String -> String -> String -> String -> IO [String]
-execDeposit baseUrl userAddress publicKey assetUnit amount = do
-  let amountList = [(Text.pack assetUnit, read amount :: Integer)]
-  let userAddrMaybe = if null userAddress then Nothing else Just $ Text.pack userAddress
-  let pubKeyMaybe = if null publicKey then Nothing else Just $ Text.pack publicKey
-  let depositReq =
-        DepositSchema
-          { depositUserAddress = userAddrMaybe
-          , depositPublicKey = pubKeyMaybe
-          , depositAmount = amountList
-          , depositFundsUtxoRef = Nothing
-          }
-  execWithDebug baseUrl depositReq (\r -> runHydraClient baseUrl $ deposit r)
-
--- | Execute withdraw
-execWithdraw :: String -> String -> String -> String -> String -> String -> IO [String]
-execWithdraw baseUrl address owner utxoHash utxoIndexStr signature = do
-  let utxo =
-        FundsUtxo
-          { fundsUtxoSignature = Just $ Text.pack signature
-          , fundsUtxoRef =
-              TxOutRef
-                { txOutRefHash = Text.pack utxoHash
-                , txOutRefIndex = read utxoIndexStr
-                }
-          }
-  let withdrawReq =
-        WithdrawSchema
-          { withdrawAddress = Text.pack address
-          , withdrawOwner = Text.pack owner
-          , withdrawFundsUtxos = Vec.fromList [utxo]
-          , withdrawNetworkLayer = "L1"
-          }
-  execWithDebug baseUrl withdrawReq (runHydraClient baseUrl . withdraw)
-
--- | Execute pay merchant
-execPayMerchant :: String -> String -> String -> String -> String -> String -> String -> String -> String -> IO [String]
-execPayMerchant baseUrl merchantAddress utxoHash utxoIndexStr assetUnit amount signature merchantUtxoHash merchantUtxoIndexStr = do
-  let merchantUtxo =
-        if null merchantUtxoHash
-          then Nothing
-          else
-            Just
-              TxOutRef
-                { txOutRefHash = Text.pack merchantUtxoHash
-                , txOutRefIndex = read merchantUtxoIndexStr
-                }
-  let amountList = [(Text.pack assetUnit, read amount :: Integer)]
-  let payMerchantReq =
-        PayMerchantSchema
-          { payMerchantMerchantAddress = Text.pack merchantAddress
-          , payMerchantFundsUtxoRef =
-              TxOutRef
-                { txOutRefHash = Text.pack utxoHash
-                , txOutRefIndex = read utxoIndexStr
-                }
-          , payMerchantAmount = amountList
-          , payMerchantSignature = Text.pack signature
-          , payMerchantMerchantFundsUtxo = merchantUtxo
-          }
-  execWithDebug baseUrl payMerchantReq (\r -> runHydraClient baseUrl $ payMerchant r)
-
--- | Execute open head
-execOpenHead :: String -> String -> IO [String]
-execOpenHead baseUrl urlsStr = do
-  let urls = fmap Text.pack $ words urlsStr
-  let openHeadReq = ManageHeadSchema {manageHeadPeerApiUrls = Vec.fromList urls}
-  let debugInfo = formatRequestJsonDebug openHeadReq
-
-  result <- runHydraClient baseUrl $ openHead openHeadReq
-  case result of
-    Left err -> return $ debugInfo ++ formatError err
-    Right opResp -> return $ ["Success!", "Head opened successfully!", "", "Operation ID: " ++ Text.unpack (operationResponseOperationId opResp), ""] ++ debugInfo
-
--- | Execute close head
-execCloseHead :: String -> String -> IO [String]
-execCloseHead baseUrl headId = do
-  let debugInfo = formatRequestDebug $ "Head ID: " ++ headId
-  result <- runHydraClient baseUrl $ closeHead headId
-  case result of
-    Left err -> return $ debugInfo ++ formatError err
-    Right stateResp -> return $ ["Success!", "Head closed successfully!", "", "Status: " ++ Text.unpack (headStateStatus stateResp), ""] ++ debugInfo
-
 -- | Fetch Hydra Heads for all services
 fetchHydraHeads :: [Service] -> IO [HydraHeadInfo]
 fetchHydraHeads services = do
@@ -845,9 +867,73 @@ fetchHydraHeads services = do
         Left _ -> return $ HydraHeadInfo {hydraHeadPort = servicePort service, hydraHeadId = Nothing}
         Right maybeHeadId -> return $ HydraHeadInfo {hydraHeadPort = servicePort service, hydraHeadId = maybeHeadId}
 
+-- | Persist deposits for open heads that don't have deposits in the database yet
+-- This helps recover deposits for heads that were opened before persistence was implemented
+persistMissingDeposits :: Sqlite.ConnectionPool -> [Service] -> [HydraHeadInfo] -> IO ()
+persistMissingDeposits dbPool' services heads = do
+  -- For each open head, check if it has deposits in the database using service port
+  mapM_ (\headInfo -> do
+    case hydraHeadId headInfo of
+      Nothing -> return ()  -- Skip closed heads
+      Just "OPENING" -> return ()  -- Skip opening heads
+      Just _ -> do
+        let port = hydraHeadPort headInfo
+        -- Check if this service port has deposits in the database
+        existingAddresses <- runDB dbPool' $ getDepositsByServicePort port
+        -- If no deposits exist, try to fetch and persist uncommitted deposits
+        if null existingAddresses
+          then do
+            -- Find the corresponding service
+            let maybeService = find (\s -> servicePort s == port) services
+            case maybeService of
+              Just service -> do
+                let serviceUrl = serviceBaseUrl service
+                -- Fetch uncommitted deposits for this service
+                uncommittedResult <- runHydraClient serviceUrl getUncommittedDeposits
+                case uncommittedResult of
+                  Right uncommittedResp -> do
+                    let deposits = uncommittedDepositsDeposits uncommittedResp
+                    if not (Vec.null deposits)
+                      then runDB dbPool' $ insertCommittedDeposits port deposits
+                      else return ()
+                  Left _ -> return ()  -- Ignore errors
+              Nothing -> return ()
+          else return ()
+    ) heads
+  return ()
+
+-- | Fetch users by head from database (using service port)
+fetchUsersByHead :: Sqlite.ConnectionPool -> [HydraHeadInfo] -> IO UsersByHead
+fetchUsersByHead dbPool' heads = do
+  userLists <- mapM (\headInfo -> do
+    case hydraHeadId headInfo of
+      Nothing -> return (show (hydraHeadPort headInfo) ++ " (Closed)", [])
+      Just "OPENING" -> return (show (hydraHeadPort headInfo) ++ " (OPENING)", [])
+      Just headId -> do
+        let port = hydraHeadPort headInfo
+        addresses <- runDB dbPool' $ getDepositsByServicePort port
+        return (headId, map Text.unpack addresses)
+    ) heads
+  return userLists
+
+-- | Fetch pending deposits (uncommitted deposits) from API
+fetchPendingDeposits :: String -> IO PendingDeposits
+fetchPendingDeposits baseUrl = do
+  result <- runHydraClient baseUrl getUncommittedDeposits
+  case result of
+    Left _ -> return []  -- Return empty list on error
+    Right resp -> do
+      let depositsVector = uncommittedDepositsDeposits resp
+          deposits = Vec.toList depositsVector
+      return deposits
+
 -- | Run the TUI application
 runTUI :: [Service] -> IO ()
 runTUI servicesList = do
+  -- Suppress SQL logging by redirecting stderr temporarily or using NoLoggingT
+  -- Initialize database
+  dbPool' <- initDatabase "./committed-deposits.db"
+
   splashLogoContent <- readFile "./ascii_art/SplashLogo.txt"
   headerLogoContent <- readFile "./ascii_art/HeaderLogo.txt"
   let splashLogoLines = lines splashLogoContent
@@ -858,6 +944,10 @@ runTUI servicesList = do
                          else servicesList
   -- Fetch initial Hydra Heads data
   initialHeads <- fetchHydraHeads defaultServices
+  initialUsersByHead <- fetchUsersByHead dbPool' initialHeads
+  -- Fetch initial pending deposits from first service
+  let firstServiceUrl = serviceBaseUrl $ head defaultServices
+  initialPendingDeposits <- fetchPendingDeposits firstServiceUrl
   let initialState =
         AppState
           { currentScreen = SplashScreen
@@ -866,6 +956,10 @@ runTUI servicesList = do
           , splashLogo = splashLogoLines
           , headerLogo = headerLogoLines
           , hydraHeads = initialHeads
+          , dbPool = dbPool'
+          , usersByHead = initialUsersByHead
+          , pendingDeposits = initialPendingDeposits
+          , refreshCounter = 0
           }
   let app =
         M.App

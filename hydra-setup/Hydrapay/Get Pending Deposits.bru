@@ -1,0 +1,15 @@
+meta {
+  name: Get Pending Deposits
+  type: http
+  seq: 9
+}
+
+get {
+  url: /get-uncommitted-deposits
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}

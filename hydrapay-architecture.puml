@@ -1,0 +1,140 @@
+@startuml 
+' !theme toy
+
+skinparam linetype polyline
+' allowmixing
+
+
+title "Components Diagram"
+caption: HydraPay Load Balancer - Distributed Hydra Payment System
+
+skinparam interface {
+    BackgroundColor Orange
+}
+
+skinparam component {
+    BackgroundColor<<Blazar>> Cyan
+    BackgroundColor<<New>> LightGreen
+    FontSize Black
+
+    BackgroundColor<<Hydra>> LightBlue
+
+}
+
+skinparam node {
+    BackgroundColor<<Cardano>> Blue
+    FontColor<<Cardano>> White
+}
+skinparam cloud {
+    BackgroundColor LightBlue
+}
+
+skinparam database {
+    BackgroundColor LightYellow
+}
+
+
+frame HLA #LightGray {
+
+    Actor User
+    Actor Merchant
+    Actor Admin
+
+
+    component TUI <<New>> as "Admin User Interface"     
+    component MobileAppUser <<Blazar>> as "User Mobile App"
+    component MobileAppMerchant <<Blazar>> as "Merchant Mobile App"
+    interface BlazarPayAPI as "Blazar Pay API" 
+
+    MobileAppUser .down. BlazarPayAPI  : Depoist \n Withdraw \n Pay Merchant \n Query Funds 
+    MobileAppMerchant .down. BlazarPayAPI  :  Depoist \n Withdraw \n Pay Merchant \n Query Funds 
+    TUI .down. BlazarPayAPI : Open Head \n Close Head \n Query Funds \n Get Pending Deposits \n Get Head State
+
+    component BlazarHydraServices as "Blazar Hydra Services" {
+
+        
+        component LoadBalancer as "Hydra Pay\nLoad Balancer" <<New>> {
+            note as LBNote
+            Load Balancer is responsible for routing requests 
+             to the appropriate Blazar Hydra Service 
+             based on the user's address or merchant's address.
+             
+            Can support any number of Blazar Hydra Services.
+            end note
+        }
+
+        LoadBalancer .up. BlazarPayAPI
+  
+
+        component BlazarHydraService1 as "Blazar Hydra Service 1" {
+            component BlazarHydra1 as "Blazar Hydra\nService 1" <<Blazar>> {
+            }
+
+            component HydraNode1 as "Hydra Node 1" <<Hydra>> {
+            }
+            BlazarHydra1 .down. HydraNode1 : Hydra Rest API
+
+
+        }
+
+
+        component BlazarHydraService2 as "Blazar Hydra Service 2" {
+            component BlazarHydra2 as "Blazar Hydra\nService 2" <<Blazar>> {
+            }
+
+            component HydraNode2 as "Hydra Node 2" <<Hydra>> {
+            }
+            BlazarHydra2 .down. HydraNode2 : Hydra Rest API
+        }
+
+
+
+
+
+
+
+        component BlazarHydraServiceN as "Blazar Hydra Service N" {
+            component BlazarHydraN as "Blazar Hydra\nService N" <<Blazar>> {
+            }
+
+            component HydraNodeN as "Hydra Node N" <<Hydra>> {
+            }
+            BlazarHydraN .down. HydraNodeN : Hydra Rest API
+        }
+
+        node CardanoNode as "Cardano Node" <<Cardano>> {
+        }
+
+
+
+
+
+        LoadBalancer .down.. BlazarHydra1  
+        LoadBalancer .down.. BlazarHydra2    
+        LoadBalancer .down.. BlazarHydraN  
+
+        HydraNode1 .down.. CardanoNode : IPC Socket
+        HydraNode2 .down.. CardanoNode : IPC Socket
+        HydraNodeN .down.. CardanoNode : IPC Socket
+    }
+
+    cloud BlockchainNetwork as "Cardano Blockchain\nNetwork" {
+        note as SmarContracts
+        Hydra Pay
+        Smart Contracts
+        end note
+    }
+    CardanoNode .down.. BlockchainNetwork
+
+    Admin .down. TUI
+    User .down. MobileAppUser
+    Merchant .down. MobileAppMerchant
+
+
+}
+
+
+
+
+
+@enduml

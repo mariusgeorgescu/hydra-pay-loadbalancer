@@ -15,6 +15,8 @@ module HydraPay.API.Types
     HeadStateResponse (..),
     OperationResponse (..),
     FundsUtxo (..),
+    UncommittedDepositsResponse (..),
+    UncommittedDeposit (..),
 
     -- * Error Types
     HydraApiError (..),
@@ -30,8 +32,8 @@ where
 
 import Control.Applicative ((<|>))
 import Data.Maybe (mapMaybe)
-import Data.Aeson (Value(Array, String, Null, Object, Number), ToJSON(toJSON), FromJSON(parseJSON), object, (.=), (.:))
-import Data.Aeson.Types (defaultOptions, genericToJSON, genericParseJSON, Options(..))
+import Data.Aeson (Value(Array, String, Null, Object, Number), ToJSON(toJSON), FromJSON(parseJSON), object, (.=), (.:), (.:?), withObject)
+import Data.Aeson.Types (defaultOptions, genericToJSON, genericParseJSON, Options(..), Parser)
 import Data.Char (toLower, toUpper, isUpper)
 import Data.Scientific (Scientific)
 import qualified Data.Scientific as Sci
@@ -427,3 +429,79 @@ instance FromJSON HydraApiError where
       <|> HydraInternalServerError <$> parseJSON v
       <|> HydraClientError <$> (obj .: "message")
   parseJSON _ = fail "Expected JSON object"
+
+-- | Uncommitted deposit entry
+-- Note: API returns structure with "funds" object instead of "amount" array
+-- and may not include "fundsUtxoRef"
+data UncommittedDeposit = UncommittedDeposit
+  { uncommittedDepositAddress :: Text,
+    uncommittedDepositAmount :: [(Text, Integer)],  -- List of (asset unit, amount) tuples
+    uncommittedDepositFundsUtxoRef :: Maybe TxOutRef  -- Optional, may not be present in API response
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON UncommittedDeposit where
+  toJSON (UncommittedDeposit addr amt utxoRef) =
+    let amountArray = Array $ Vec.fromList $ map (\(unit, val) -> Array $ Vec.fromList [String unit, Number (Sci.scientific (fromIntegral val) 0)]) amt
+        baseObj = [ ("address", String addr)
+                  , ("amount", amountArray)
+                  ]
+        objWithUtxo = case utxoRef of
+          Just ref -> ("fundsUtxoRef", toJSON ref) : baseObj
+          Nothing -> baseObj
+    in object objWithUtxo
+
+instance FromJSON UncommittedDeposit where
+  parseJSON = withObject "UncommittedDeposit" $ \v -> do
+    addr <- v .: "address"
+    -- Parse "funds" object: {"lovelace": 1218000000} -> [("lovelace", 1218000000)]
+    fundsValue <- v .: "funds"
+    -- Parse funds object directly using withObject
+    amountListObj <- withObject "funds" (\funds -> do
+      -- Extract all numeric values from the funds object
+      -- Try common keys like "lovelace"
+      lovelaceMaybe <- funds .:? "lovelace"
+      let amounts = case lovelaceMaybe of
+            Just (Number num) -> [("lovelace", floor num)]
+            _ -> []
+      -- TODO: Handle other asset keys dynamically if needed
+      return amounts) fundsValue
+    -- Fallback: try to parse "amount" array format (for compatibility)
+    amountArrayMaybe <- v .:? "amount"
+    amountListFromArray <- case amountArrayMaybe of
+      Just (Array vec) -> return $ mapMaybe (\item -> case item of
+            Array itemVec -> case Vec.toList itemVec of
+              [String unit, Number num] -> Just (unit, floor num)
+              _ -> Nothing
+            _ -> Nothing) (Vec.toList vec)
+      _ -> return []
+    -- Use funds object if available, otherwise use amount array
+    let finalAmountList = if null amountListObj then amountListFromArray else amountListObj
+    -- fundsUtxoRef is optional (not present in actual API response)
+    utxoRef <- v .:? "fundsUtxoRef"
+    return $ UncommittedDeposit addr finalAmountList utxoRef
+
+-- | Uncommitted deposits response
+-- The API returns either an array directly or an object with "deposits" field
+data UncommittedDepositsResponse = UncommittedDepositsResponse
+  { uncommittedDepositsDeposits :: Vector UncommittedDeposit
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON UncommittedDepositsResponse where
+  toJSON resp = Array $ Vec.map toJSON $ uncommittedDepositsDeposits resp
+
+instance FromJSON UncommittedDepositsResponse where
+  parseJSON (Array vec) = do
+    -- API returns array directly
+    deposits <- mapM parseJSON (Vec.toList vec)
+    return $ UncommittedDepositsResponse $ Vec.fromList deposits
+  parseJSON (Object v) = do
+    -- Fallback: try to parse as object with "deposits" field
+    depositsArray <- v .: "deposits"
+    case depositsArray of
+      Array vec -> do
+        deposits <- mapM parseJSON (Vec.toList vec)
+        return $ UncommittedDepositsResponse $ Vec.fromList deposits
+      _ -> fail "Expected array in 'deposits' field"
+  parseJSON _ = fail "Expected array or object for UncommittedDepositsResponse"

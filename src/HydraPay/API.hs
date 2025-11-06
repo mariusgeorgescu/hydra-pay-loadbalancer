@@ -18,6 +18,7 @@ type HydraAPI =
   :<|> "close-head" :> QueryParam' '[Required] "id" String :> Post '[JSON] HeadStateResponse
   :<|> "get-head" :> Get '[JSON] (Maybe String)
   :<|> "state" :> QueryParam' '[Required] "id" String :> Get '[JSON] HeadStateResponse
+  :<|> "get-uncommitted-deposits" :> Get '[JSON] UncommittedDepositsResponse
 
 -- | Proxy for the API type
 hydraAPI :: Proxy HydraAPI

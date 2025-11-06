@@ -10,6 +10,7 @@ module HydraPay.Client
   , closeHead
   , getHead
   , getHeadState
+  , getUncommittedDeposits
     
   -- * Client runner
   , runHydraClient
@@ -56,9 +57,10 @@ openHead :: ManageHeadSchema -> ClientM OperationResponse
 closeHead :: String -> ClientM HeadStateResponse  -- Takes head ID as query parameter, returns status
 getHead :: ClientM (Maybe String)  -- Returns head ID if RUNNING, null otherwise
 getHeadState :: String -> ClientM HeadStateResponse  -- Takes head ID as query parameter
+getUncommittedDeposits :: ClientM UncommittedDepositsResponse
 
 -- Generate client from API definition
-(queryFunds :<|> deposit' :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead :<|> getHead :<|> getHeadState) = client hydraAPI
+(queryFunds :<|> deposit' :<|> withdraw :<|> payMerchant :<|> openHead :<|> closeHead :<|> getHead :<|> getHeadState :<|> getUncommittedDeposits) = client hydraAPI
 
 -- Exported wrapper (keeping original name for compatibility)
 deposit :: DepositSchema -> ClientM TxBuiltResponse
