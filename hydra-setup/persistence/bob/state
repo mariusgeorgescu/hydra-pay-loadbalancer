@@ -336,3 +336,5 @@
 {"eventId":366,"stateChanged":{"chainSlot":106765885,"tag":"TickObserved"},"time":"2025-11-06T17:11:25.172431208Z"}
 {"eventId":367,"stateChanged":{"chainSlot":106765894,"tag":"TickObserved"},"time":"2025-11-06T17:11:34.116385212Z"}
 {"eventId":368,"stateChanged":{"chainSlot":106765927,"tag":"TickObserved"},"time":"2025-11-06T17:12:07.179107505Z"}
+{"eventId":369,"stateChanged":{"chainSlot":106765998,"tag":"TickObserved"},"time":"2025-11-06T17:13:18.297321886Z"}
+{"eventId":370,"stateChanged":{"chainSlot":106766003,"tag":"TickObserved"},"time":"2025-11-06T17:13:23.10417018Z"}
