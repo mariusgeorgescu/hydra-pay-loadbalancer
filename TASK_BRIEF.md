@@ -660,12 +660,6 @@ The dashboard displays real-time information across three widgets:
 
 ## Future Enhancements
 
-1. **Health-based Routing**: Route requests based on service health metrics and response times
-2. **Service Registration**: Allow services to register themselves instead of port scanning
-3. **Admin API Support**: Expose admin endpoints through the load balancer
-4. **Metrics and Monitoring**: Add Prometheus metrics and health check endpoints
-5. **Configuration File**: Support configuration via file or environment variables
-6. **Load Balancing Algorithms**: Implement round-robin, least-connections, or weighted routing
 7. **Circuit Breakers**: Implement circuit breakers to prevent cascading failures
 8. **Request Caching**: Cache query-funds results for frequently accessed addresses
 
@@ -674,5 +668,39 @@ The dashboard displays real-time information across three widgets:
 
 ## Conclusion
 
-The HydraPay Load Balancer successfully extends the Blazar Hydra payment system to support horizontal scaling. By implementing intelligent routing strategies, automatic service discovery, and graceful error handling, it enables multiple Hydra service instances to operate seamlessly behind a single entry point. The challenges encountered during development—from HTTP header compatibility to complex JSON serialization—required deep understanding of both the HTTP protocol and the Cardano/Hydra ecosystem, resulting in a robust and maintainable solution.
+The HydraPay Load Balancer represents a significant advancement in scaling Cardano payment infrastructure, successfully extending the Blazar Hydra payment system to support horizontal scaling through intelligent middleware design. This project demonstrates how careful architectural decisions and domain-specific routing strategies can overcome the inherent challenges of distributed payment systems.
+
+### Key Achievements
+
+The load balancer achieves its primary goal of enabling multiple Hydra service instances to operate seamlessly behind a single entry point, effectively transforming a single-service architecture into a horizontally scalable system. This is accomplished through three core innovations:
+
+**1. Intelligent Operation-Based Routing**
+The system implements distinct routing strategies tailored to each operation type, recognizing that different payment operations have fundamentally different requirements. The "try all, return first success" strategy for `pay-merchant` operations leverages the unique properties of UTxO references in the Cardano ecosystem, eliminating the need for complex service-to-head mapping while ensuring requests automatically route to the correct service. 
+
+**2. Zero-Configuration Service Discovery**
+The automatic service discovery mechanism eliminates the need for service registration, coordination protocols, or centralized service registries. By scanning a configurable port range and treating any HTTP response as an availability signal, the system achieves resilience and simplicity. This design choice prioritizes operational ease over sophisticated coordination mechanisms, making the system easier to deploy and maintain while still providing dynamic service detection.
+
+**3. Sophisticated Result Aggregation**
+The recursive JSON aggregation logic for `query-funds` operations demonstrates the complexity of combining results from multiple distributed systems. The solution handles arbitrary nested JSON structures, sums numeric values across different asset types, and correctly preserves L1 (mainnet) values while aggregating L2 (Hydra head) values. This capability enables users to see their complete balance across all Hydra heads without needing to query each service individually.
+
+
+
+### Challenges Overcome
+
+The development process encountered and solved several non-trivial challenges:
+
+- **HTTP Protocol Nuances**: Handling HTTP header compatibility issues between different HTTP client libraries required deep understanding of the HTTP specification and careful testing
+- **Dynamic JSON Structures**: Aggregating arbitrary JSON structures representing Cardano multi-asset values required recursive algorithms that maintain correctness while handling unknown asset types
+- **Distributed State Management**: Coordinating operations across multiple services without shared state required innovative routing strategies that leverage domain-specific properties (UTxO uniqueness)
+- **Error Handling Complexity**: Differentiating between acceptable partial failures and critical errors across multiple services required careful error classification and response strategies
+
+
+### Future Potential
+
+While the current implementation addresses the core requirements, the architecture provides a foundation for future enhancements. The modular design can accommodate circuit breakers, request caching, load-aware routing, and more sophisticated service discovery mechanisms. The TUI component demonstrates how the load balancer can serve as a platform for additional tooling and administrative interfaces.
+
+### Final Thoughts
+
+The HydraPay Load Balancer project demonstrates that effective scaling solutions require deep understanding of both the underlying system (Blazar Hydra, Cardano) and general distributed systems principles. 
+The resulting system provides a robust, maintainable foundation for scaling Cardano payment infrastructure, enabling the HydraPay ecosystem to grow and handle increased load while maintaining the simplicity and reliability that users expect from payment systems.
 
